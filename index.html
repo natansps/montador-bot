@@ -6607,15 +6607,18 @@ onPlayerPositionChange(function(oldPos, newPos)
 end)
 </script>
 <script type="text/x-lua" data-kind="block" data-id="keepmainbp">
--- Mantém a backpack equipada sempre aberta e puxa para ela:
--- gold, platinum, crystal coin e adventurer's stone.
--- Macro sem nome = fica ativo o tempo todo (sem botão on/off).
+-- Keeps the equipped backpack always open and pulls into it:
+-- gold, platinum and crystal coins, adventurer's stone, tokens and item 15280.
+-- Unnamed macro = always active (no on/off switch).
+-- Event driven: containers are only scanned again after something changes
+-- (container opened/closed, item added/removed/updated), so idle ticks cost nothing.
 
 local CONFIG = {
-  intervalo   = 250,   -- ms entre verificacoes
-  reabrirCada = 2000,  -- ms minimo entre tentativas de reabrir a bp
-  itens = {
-    -- IDs do client 12+/13+ (Aurera Global)
+  interval    = 250,   -- ms between checks
+  reopenEvery = 2000,  -- min ms between attempts to reopen the backpack
+  fullScan    = 3000,  -- safety: full scan at least this often, even with no events
+  items = {
+    -- client 12+/13+ IDs (Aurera Global)
     [3031]  = true,  -- gold coin
     [3035]  = true,  -- platinum coin
     [3043]  = true,  -- crystal coin
@@ -6623,75 +6626,102 @@ local CONFIG = {
     [15280] = true,  -- item 15280
     [22721] = true,  -- gold token
     [22516] = true,  -- silver token
-    -- IDs antigos (servidores 8.x/10.x) - descomente se precisar
+    -- old IDs (8.x/10.x servers) - uncomment if needed
     -- [2148] = true, [2152] = true, [2160] = true,
   },
+  -- Containers that are never emptied (big and pointless to scan)
+  skipNames = {"depot", "locker", "inbox", "stash", "store", "reward"},
 }
 
-local ultimoReabrir = 0
-local avisouCheia   = false
+local lastReopen = 0
+local warnedFull = false
+local dirty      = true   -- something changed since the last scan
+local lastScan   = 0
 
--- Retorna o container aberto da backpack equipada (nivel raiz)
+local function markDirty() dirty = true end
+onContainerOpen(markDirty)
+onContainerClose(markDirty)
+onAddItem(markDirty)
+onRemoveItem(markDirty)
+onContainerUpdateItem(markDirty)
+
+-- Open container of the equipped backpack (root level)
 local function getMainBp()
   local back = getBack()
   if not back then return nil end
+  local backId = back:getId()
   for _, c in pairs(g_game.getContainers()) do
     local ci = c:getContainerItem()
-    if ci and ci:getId() == back:getId() and not c:hasParent() then
+    if ci and ci:getId() == backId and not c:hasParent() then
       return c
     end
   end
   return nil
 end
 
--- Procura na main bp uma pilha do mesmo item que ainda caiba mais
-local function acharPilha(bp, id)
-  for _, it in ipairs(bp:getItems()) do
-    if it:getId() == id and it:isStackable() and it:getCount() < 100 then
-      return it
-    end
+local function skipContainer(c)
+  local name = (c:getName() or ""):lower()
+  for _, s in ipairs(CONFIG.skipNames) do
+    if name:find(s, 1, true) then return true end
   end
-  return nil
+  return false
 end
 
-macro(CONFIG.intervalo, function()
+macro(CONFIG.interval, function()
   local back = getBack()
   if not back then return end
 
-  -- 1) Garante a bp principal aberta
+  -- 1) Make sure the main backpack is open
   local bp = getMainBp()
   if not bp then
-    if now - ultimoReabrir >= CONFIG.reabrirCada then
-      ultimoReabrir = now
+    if now - lastReopen >= CONFIG.reopenEvery then
+      lastReopen = now
       g_game.open(back, nil)
     end
     return
   end
 
-  -- 2) Procura os itens nos outros containers abertos
+  -- 2) Nothing changed: skip the scan
+  if not dirty and now - lastScan < CONFIG.fullScan then return end
+  dirty = false
+  lastScan = now
+
+  -- Main backpack contents read once per scan
+  local bpItems = bp:getItems()
+  local stacks = {}  -- id -> stack in the main bp that still has room
+  for _, it in ipairs(bpItems) do
+    local id = it:getId()
+    if CONFIG.items[id] and not stacks[id] and it:isStackable() and it:getCount() < 100 then
+      stacks[id] = it
+    end
+  end
+  local hasFreeSlot = #bpItems < bp:getCapacity()
+
+  -- 3) Look for the items in the other open containers
   for _, c in pairs(g_game.getContainers()) do
-    if c ~= bp then
+    if c ~= bp and not skipContainer(c) then
       for _, item in ipairs(c:getItems()) do
         local id = item:getId()
-        if CONFIG.itens[id] then
-          local destino
-          local pilha = item:isStackable() and acharPilha(bp, id)
+        if CONFIG.items[id] then
+          local dest
+          local stack = item:isStackable() and stacks[id]
 
-          if pilha then
-            destino = pilha:getPosition()          -- junta na pilha existente
-          elseif #bp:getItems() < bp:getCapacity() then
-            destino = bp:getSlotPosition(0)        -- slot livre
+          if stack then
+            dest = stack:getPosition()          -- merge into the existing stack
+          elseif hasFreeSlot then
+            dest = bp:getSlotPosition(0)        -- free slot
           else
-            if not avisouCheia then
-              warn("[BP Principal] Backpack principal cheia!")
-              avisouCheia = true
+            if not warnedFull then
+              warn("[Main BP] Main backpack is full!")
+              warnedFull = true
             end
             return
           end
 
-          avisouCheia = false
-          g_game.move(item, destino, item:getCount())
-          return -- um movimento por ciclo, evita spam
+          warnedFull = false
+          g_game.move(item, dest, item:getCount())
+          dirty = true  -- check again next tick for the remaining items
+          return        -- one move per cycle, avoids spam
         end
       end
     end
@@ -7339,7 +7369,7 @@ const MACROS = [
   { id: "followrastro", name: "Follow Rastro", src: "Extras", desc: "Anda até o sqm de onde o líder acabou de sair, pisando no rastro dele (campo com o nome do líder). Não ligue junto com o Follow + Atk." },
   { id: "autoequipper", name: "Auto Equipper (HP/MP %)", src: "Extras", desc: "De F.Almeida: troca itens (anéis, amuletos etc.) conforme faixas de HP e MP, com janela Setup, ícone e opção de parar em PZ.", fix: "Deixa o montador escolher a aba, corrige o slot padrão do primeiro item (anel) e a busca de backpack livre no modo sem hotkey." },
   { id: "travel", noPanel: true, mode: "always", name: "Travel (janela de viagem)", src: "Extras", desc: "Ao chegar perto de um NPC de barco/viagem conhecido, abre uma janela com os destinos; escolher um faz o hi / destino / yes." },
-  { id: "keepmainbp", noPanel: true, mode: "always", name: "Keep Main Backpack Open", src: "Extras", desc: "Mantém a backpack equipada sempre aberta e puxa para ela gold, platinum e crystal coin, adventurer's stone, gold e silver token e o item 15280 (junta na pilha ou usa um slot livre; avisa se a bp estiver cheia)." },
+  { id: "keepmainbp", noPanel: true, mode: "always", name: "Keep Main Backpack Open", src: "Extras", desc: "Mantém a backpack equipada sempre aberta e puxa para ela gold, platinum e crystal coin, adventurer's stone, gold e silver token e o item 15280 (junta na pilha ou usa um slot livre; avisa se a bp estiver cheia). Só procura de novo quando algo muda nos containers, e ignora depot, inbox e stash.", fix: "Mais leve: antes varria todos os containers abertos a cada 0,25 s, o que gerava o aviso “Slow macro”." },
   { id: "autoprey", name: "Auto Roll Prey", src: "Extras", req: ["items"], desc: "Escolhe os monstros da lista nos slots de prey e renova os de XP Bonus com pouco tempo; liga pelo ícone Preys.", fix: "A lista de criaturas agora fica salva no bot (antes sumia ao recarregar) e o aviso de lista vazia não repete sem parar." },
   { id: "panelwidth", name: "Largura dos painéis", src: "Extras", desc: "Switch “Panel Width” e botão Setup: janela com largura individual (150–400 px) para cada painel lateral (Left/Right 1–3). Acha o painel principal da direita mesmo quando o client usa outro nome nele e mostra no terminal os ids encontrados se não achar. Desligar volta tudo ao tamanho original." },
 ];
