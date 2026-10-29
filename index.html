@@ -2153,20 +2153,53 @@ local function checkStance()
   end
 end
 
+-- Stances are detected by their in-game NAME, not by the words that cast them
+-- (e.g. "You have activated the Master of Decay."). The match ignores case and
+-- extra wording; the buttons keep casting the words ("uteta mort").
+local stanceByLowerName = {}
+for stanceName in pairs(stanceToGroup) do
+  stanceByLowerName[stanceName:lower()] = stanceName
+end
+
+local function findStanceInText(lowerText)
+  -- Longest name wins, so a short name never shadows a longer one.
+  local found, foundLen = nil, 0
+  for lowerName, stanceName in pairs(stanceByLowerName) do
+    if #lowerName > foundLen and lowerText:find(lowerName, 1, true) then
+      found, foundLen = stanceName, #lowerName
+    end
+  end
+  return found
+end
+
 onTextMessage(function(mode, text)
-  local action, stanceName = text:match("You have (%a+) the (.+)%.")
-  local groupIndex = stanceName and stanceToGroup[stanceName]
-  if not groupIndex then return end
+  local lowerText = text:lower()
+  local action
+  if lowerText:find("deactivated", 1, true) then
+    action = "deactivated"
+  elseif lowerText:find("activated", 1, true) then
+    action = "activated"
+  else
+    return
+  end
+
+  local stanceName = findStanceInText(lowerText)
+  if not stanceName then
+    -- Unknown name: log it so it can be added to stanceGroups.
+    if lowerText:find("you have", 1, true) then
+      warn("[Skill Panel] Stance not recognized: " .. text)
+    end
+    return
+  end
+  local groupIndex = stanceToGroup[stanceName]
 
   if action == "activated" then
     activeByGroup[groupIndex] = stanceName
   elseif action == "deactivated" then
-    -- Só limpa se for a stance ativa no grupo (evita apagar a nova).
+    -- Only clear it if it is still the active one (a swap may already have replaced it).
     if activeByGroup[groupIndex] == stanceName then
       activeByGroup[groupIndex] = nil
     end
-  else
-    return
   end
   checkStance()
 end)
