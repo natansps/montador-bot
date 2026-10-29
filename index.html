@@ -6097,7 +6097,7 @@ end
 
 -- Icon / Hotkey
 if config.sIcon then
-  local icon = addIcon("AutoEquipV2", {item = 3088, text="Auto\nEquip", switchable=false, moveable=true}, 
+  local icon = addIcon("AutoEquipV2", {item = 3088, text="Auto Equip", switchable=false, moveable=true}, 
   function(widget,isOn) ui.main.onClick(ui.main) end)
   -- Sadly we need this..
   macro(50,function()
@@ -6105,7 +6105,7 @@ if config.sIcon then
     icon.item:setItemId(config.enabled and 3089 or 3100)
     ui.main:setOn(config.enabled)
   end)
-  icon:setSize({height=60,width=40})
+  icon:setWidth(100)  -- same width as the other icons
   -- Position is handled by the vBot like every other icon (Ctrl+drag, saved,
   -- keeps the distance from the screen edge); the old fixed X/Y is not used.
   icon.hotkey:setText('')
