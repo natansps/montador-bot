@@ -6004,44 +6004,7 @@ AE_SettingsWindow < MainWindow
 
   AES_CheckBox
     id: sIcon
-    text: Create Icon / Icon Position:
-
-  Label
-    anchors.left: prev.left
-    anchors.top: prev.bottom
-    text-align: center
-    margin-top: 5
-    width: 40
-    height: 20
-    !text: ('Pos X: ')
-
-  SpinBox
-    id: sIPX
-    anchors.left: prev.right
-    anchors.top: prev.top
-    anchors.bottom: prev.bottom
-    minimum: 0
-    maximum: 2000
-    width: 50
-    step: 10
-
-  Label
-    anchors.right: sIPY.left
-    anchors.top: prev.top
-    anchors.bottom: prev.bottom
-    text-align: center
-    width: 40
-    !text: ('Pos Y: ')
-
-  SpinBox
-    id: sIPY
-    anchors.right: parent.right
-    anchors.top: sIPX.top
-    anchors.bottom: sIPX.bottom
-    minimum: 0
-    maximum: 2000
-    width: 50
-    step: 10
+    text: Create Icon (Ctrl+drag the icon to move it)
 
   AES_Sep
 
@@ -6134,22 +6097,17 @@ end
 
 -- Icon / Hotkey
 if config.sIcon then
-  local icon = addIcon("AutoEquipV2", {item = 3088, text="Auto\nEquip", switchable=false}, 
+  local icon = addIcon("AutoEquipV2", {item = 3088, text="Auto\nEquip", switchable=false, moveable=true}, 
   function(widget,isOn) ui.main.onClick(ui.main) end)
   -- Sadly we need this..
   macro(50,function()
     icon.text:setColor(config.enabled and "green" or "red")
     icon.item:setItemId(config.enabled and 3089 or 3100)
     ui.main:setOn(config.enabled)
-    -- Remember where the icon was dragged (Ctrl+drag), so it comes back there after a reload
-    local x, y = icon:getX(), icon:getY()
-    if (x ~= config.sIPX or y ~= config.sIPY) and (x > 0 or y > 0) then
-      config.sIPX, config.sIPY = x, y
-    end
   end)
   icon:setSize({height=60,width=40})
-  icon:breakAnchors()
-  icon:move(config.sIPX,config.sIPY)
+  -- Position is handled by the vBot like every other icon (Ctrl+drag, saved,
+  -- keeps the distance from the screen edge); the old fixed X/Y is not used.
   icon.hotkey:setText('')
   icon.text:setFont('verdana-11px-rounded')
 end
@@ -6204,17 +6162,6 @@ if rootWidget then
   end
 
   -- Spin Box
-  -- Icon Position
-  AE_SettingsWindow.sIPX:setValue(config.sIPX)
-  AE_SettingsWindow.sIPX:setStep(10)
-  AE_SettingsWindow.sIPX.onValueChange = function(widget, value)
-    config.sIPX = value
-  end
-  AE_SettingsWindow.sIPY:setValue(config.sIPY)
-  AE_SettingsWindow.sIPY:setStep(10)
-  AE_SettingsWindow.sIPY.onValueChange = function(widget, value)
-    config.sIPY = value
-  end
   -- Panels
   AE_SettingsWindow.sPanels:setValue(config.sPanels)
   AE_SettingsWindow.sPanels:setStep(2)
@@ -7372,7 +7319,7 @@ const MACROS = [
   // Extras
   { id: "automagicshield", name: "Auto Magic Shield", src: "Extras", voc: "mage", req: ["items"], desc: "Utamo vita abaixo de X% de vida e exana vita acima de Y%, ou modo Utamo Fixo (mantém o shield sempre); poção como reserva, com a quantidade no switch. Ícone na tela liga/desliga o Magic Shield; o atalho (janela Hotkeys) liga/desliga o Always On, que também liga o Magic Shield.", fix: "Substitui o antigo Utamo Vita da Main: o modo Utamo Fixo faz o mesmo papel." },
   { id: "followrastro", name: "Follow Rastro", src: "Extras", desc: "Anda até o sqm de onde o líder acabou de sair, pisando no rastro dele (campo com o nome do líder). Não ligue junto com o Follow + Atk." },
-  { id: "autoequipper", name: "Auto Equipper (HP/MP %)", src: "Extras", desc: "De F.Almeida: troca itens (anéis, amuletos etc.) conforme faixas de HP e MP, com janela Setup, ícone e opção de parar em PZ.", fix: "Deixa o montador escolher a aba, corrige o slot padrão do primeiro item (anel) e a busca de backpack livre no modo sem hotkey; o ícone agora lembra a posição para onde você o arrastou." },
+  { id: "autoequipper", name: "Auto Equipper (HP/MP %)", src: "Extras", desc: "De F.Almeida: troca itens (anéis, amuletos etc.) conforme faixas de HP e MP, com janela Setup, ícone e opção de parar em PZ.", fix: "Deixa o montador escolher a aba, corrige o slot padrão do primeiro item (anel) e a busca de backpack livre no modo sem hotkey; o ícone agora é posicionado pelo vBot como os outros (lembra onde você o arrastou e mantém a distância da borda da tela)." },
   { id: "travel", noPanel: true, mode: "always", name: "Travel (janela de viagem)", src: "Extras", desc: "Ao chegar perto de um NPC de barco/viagem conhecido, abre uma janela com os destinos; escolher um faz o hi / destino / yes." },
   { id: "keepmainbp", noPanel: true, mode: "always", name: "Keep Main Backpack Open", src: "Extras", desc: "Mantém a backpack equipada sempre aberta e puxa para ela gold, platinum e crystal coin, adventurer's stone, gold e silver token e o item 15280 (junta na pilha ou usa um slot livre; avisa se a bp estiver cheia). Só procura de novo quando algo muda nos containers, e ignora depot, inbox e stash.", fix: "Mais leve: antes varria todos os containers abertos a cada 0,25 s, o que gerava o aviso “Slow macro”." },
   { id: "autoprey", name: "Auto Roll Prey", src: "Extras", req: ["items"], desc: "Escolhe os monstros da lista nos slots de prey e renova os de XP Bonus com pouco tempo; liga pelo ícone Preys.", fix: "A lista de criaturas agora fica salva no bot (antes sumia ao recarregar) e o aviso de lista vazia não repete sem parar." },
