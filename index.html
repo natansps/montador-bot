@@ -4139,10 +4139,15 @@ local exoriMacro = macro(200, "Attack Exori", function()
 
   local target = g_game.getAttackingCreature()
   if not target then return end
-  if target:getPosition().z ~= posz() then return end
 
-  local distance = getDistanceBetween(pos(), target:getPosition())
-  local combo = combosByName[storage.ExoriAttack.combo]
+  -- Target can lose its position (died, left the screen, teleported)
+  local targetPos = target:getPosition()
+  local playerPos = pos()
+  if not targetPos or not playerPos then return end
+  if targetPos.z ~= playerPos.z then return end
+
+  local distance = getDistanceBetween(playerPos, targetPos)
+  local combo = combosByName[(storage.ExoriAttack or {}).combo]
   if not combo then return end
 
   for _, spell in ipairs(combo) do
