@@ -766,7 +766,7 @@ end
 </script>
 <script type="text/x-lua" data-kind="helper" data-id="friends">
 -- ===== Lista de amigos (compartilhada) =====
--- Uma lista só para Potion Friend, Heal Friend e Heal Friend Tio.
+-- Usada pelo Potion Friend.
 -- Aceita um nome por linha ou separados por vírgula, ponto ou ponto e vírgula.
 local function parseNameList(text)
   local out, seen = {}, {}
@@ -798,7 +798,7 @@ local function editFriendList()
   UI.MultilineEditorWindow(storage.jujubaFriends or "", {
     title = "Friend List",
     description =
-      "Shared list used by Potion Friend, Heal Friend and Heal Friend Tio.\n" ..
+      "Shared list used by Potion Friend.\n" ..
       "One name per line, or separated by comma, period or semicolon.\n\n" ..
       "Quick commands (type in any chat tab, not sent to the server):\n" ..
       "  !add Name        add (several: !add Name1, Name2)\n" ..
@@ -1014,56 +1014,1206 @@ do
     end
   end
 end
+</script>
+<script type="text/x-lua" data-kind="helper" data-id="sio">
+-- Sio (vBot / OTCv8): Priority Sio + Guild Sio in one macro.
+-- addSioModes(o) builds both modes for one vocation:
+--   o.spell       sio spell ("exura sio" / "exura tio sio")
+--   o.gran        strong sio for the tank, or nil when the vocation has none
+--   o.sioMana     sio mana cost (0 = no mana check, the server decides)
+--   o.granMana    strong sio mana cost
+--   o.priorityKey storage key for the Priority Sio names and %
+--
+-- Two modes, only one can be on at a time (turning one on turns the other off):
+--  * Priority Sio: up to 4 names by priority, each with its own sio %; with
+--    o.gran, the tank (priority 1) also gets the strong sio below its own %.
+--    Setup button.
+--  * Guild Sio: heals whoever is lowest among the guild list (downloaded from a
+--    URL with "Refresh Sio list") and your Extra names. Setup button. Extra names can be edited
+--    in a window, added with "!add Character Name" in the chat (not sent to the
+--    server) or with the right-click menu on a player.
+--
+-- Both modes share the real cooldown tracking from the server, never target your
+-- own character and only heal on the same floor.
 
--- Cura de amigo por magia (exura sio / exura tio sio).
--- o.title, o.macroName, o.spell, o.cfgKey (tabela no storage com friendHP e selfHP)
-local function addHealFriend(o)
-  local title = UI.Label(o.title)
-  title:setColor("#00ff00")
+-- =============================
+-- SHARED HELPERS
+-- =============================
 
-  local cfg = storage[o.cfgKey]
+local function addSioModes(o)
+  local function trim(text)
+    return ((text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+  end
 
-  macro(200, o.macroName, nil, function()
-    if hppercent() < cfg.selfHP then return end
-    local friends = getFriendList()
-    if #friends == 0 then return end
+  -- True when the creature (or name) is our own character: sio can't target yourself.
+  local function isSelf(target)
+    if Jujuba and Jujuba.isSelf then return Jujuba.isSelf(target) end
+    local me = g_game.getLocalPlayer()
+    if not me or not target then return false end
+    if type(target) ~= "string" then
+      if target.isLocalPlayer and target:isLocalPlayer() then return true end
+      target = target:getName()
+    end
+    return target:lower() == me:getName():lower()
+  end
 
-    for _, spec in pairs(getSpectators()) do
-      -- never sio yourself, even if your name is on the list
-      if spec:isPlayer() and not Jujuba.isSelf(spec) and table.contains(friends, spec:getName(), true)
-      and spec:getHealthPercent() <= cfg.friendHP then
-        say(o.spell .. ' "' .. spec:getName())
-        delay(100)
-        return
-      end
+  local function notify(text)
+    local tm = modules.game_textmessage
+    if tm and tm.displayGameMessage then
+      tm.displayGameMessage("[Sio] " .. text)
+    else
+      warn("[Sio] " .. text)
+    end
+  end
+
+  -- Validates a percentage (1-100); returns the value or nil if invalid.
+  local function validPercent(text)
+    local v = tonumber(text or "")
+    if v and v >= 1 and v <= 100 then
+      return math.floor(v)
+    end
+    return nil
+  end
+
+  -- =============================
+  -- PRIORITY SIO WINDOW
+  -- =============================
+
+  local granRows = o.gran and [[
+  Label
+    id: p1granLabel
+    text: Gran Sio HP
+    anchors.top: p1hp.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p1gran
+    anchors.left: p1granLabel.right
+    anchors.top: p1granLabel.top
+    margin-left: 10
+    width: 50
+
+]] or ""
+  local priorityUi = [[
+PrioritySioWindow < MainWindow
+  !text: tr('Priority Sio Config')
+  size: 350 __HEIGHT__
+  @onEscape: self:hide()
+
+  Label
+    id: selfTitle
+    text: Self Protection
+    anchors.top: parent.top
+    anchors.left: parent.left
+    margin-top: 10
+    margin-left: 10
+    color: #ffaa00
+
+  Label
+    id: selfHpLabel
+    text: Pause if my HP <=
+    anchors.top: selfTitle.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: selfHp
+    anchors.left: selfHpLabel.right
+    anchors.top: selfHpLabel.top
+    margin-left: 10
+    width: 50
+
+  HorizontalSeparator
+    id: sep1
+    anchors.top: selfHp.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 10
+
+  Label
+    id: p1title
+    text: Tank (Priority 1)
+    anchors.top: sep1.bottom
+    anchors.left: parent.left
+    margin-top: 10
+    margin-left: 10
+    color: #ffaa00
+
+  Label
+    id: p1nameLabel
+    text: Name
+    anchors.top: p1title.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p1name
+    anchors.top: p1nameLabel.bottom
+    anchors.left: parent.left
+    margin-top: 2
+    margin-left: 10
+    width: 200
+
+  Label
+    id: p1hpLabel
+    text: Sio HP
+    anchors.top: p1name.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p1hp
+    anchors.left: p1hpLabel.right
+    anchors.top: p1hpLabel.top
+    margin-left: 10
+    width: 50
+
+]] .. granRows .. [[
+  HorizontalSeparator
+    id: sep2
+    anchors.top: __SEP2_ANCHOR__.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 10
+
+  Label
+    id: p2title
+    text: Priority 2
+    anchors.top: sep2.bottom
+    anchors.left: parent.left
+    margin-top: 10
+    margin-left: 10
+    color: #ffaa00
+
+  Label
+    id: p2nameLabel
+    text: Name
+    anchors.top: p2title.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p2name
+    anchors.top: p2nameLabel.bottom
+    anchors.left: parent.left
+    margin-top: 2
+    margin-left: 10
+    width: 200
+
+  Label
+    id: p2hpLabel
+    text: Sio HP
+    anchors.top: p2name.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p2hp
+    anchors.left: p2hpLabel.right
+    anchors.top: p2hpLabel.top
+    margin-left: 10
+    width: 50
+
+  HorizontalSeparator
+    id: sep3
+    anchors.top: p2hp.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 10
+
+  Label
+    id: p3title
+    text: Priority 3
+    anchors.top: sep3.bottom
+    anchors.left: parent.left
+    margin-top: 10
+    margin-left: 10
+    color: #ffaa00
+
+  Label
+    id: p3nameLabel
+    text: Name
+    anchors.top: p3title.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p3name
+    anchors.top: p3nameLabel.bottom
+    anchors.left: parent.left
+    margin-top: 2
+    margin-left: 10
+    width: 200
+
+  Label
+    id: p3hpLabel
+    text: Sio HP
+    anchors.top: p3name.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p3hp
+    anchors.left: p3hpLabel.right
+    anchors.top: p3hpLabel.top
+    margin-left: 10
+    width: 50
+
+  HorizontalSeparator
+    id: sep4
+    anchors.top: p3hp.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 10
+
+  Label
+    id: p4title
+    text: Priority 4
+    anchors.top: sep4.bottom
+    anchors.left: parent.left
+    margin-top: 10
+    margin-left: 10
+    color: #ffaa00
+
+  Label
+    id: p4nameLabel
+    text: Name
+    anchors.top: p4title.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p4name
+    anchors.top: p4nameLabel.bottom
+    anchors.left: parent.left
+    margin-top: 2
+    margin-left: 10
+    width: 200
+
+  Label
+    id: p4hpLabel
+    text: Sio HP
+    anchors.top: p4name.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: p4hp
+    anchors.left: p4hpLabel.right
+    anchors.top: p4hpLabel.top
+    margin-left: 10
+    width: 50
+
+  Button
+    id: closeButton
+    text: Close
+    anchors.horizontalCenter: parent.horizontalCenter
+    anchors.bottom: parent.bottom
+    margin-bottom: 5
+    width: 100
+]]
+  priorityUi = priorityUi:gsub("__HEIGHT__", o.gran and "610" or "580")
+  priorityUi = priorityUi:gsub("__SEP2_ANCHOR__", o.gran and "p1gran" or "p1hp")
+  g_ui.loadUIFromString(priorityUi)
+
+  -- =============================
+  -- STORAGE
+  -- =============================
+
+  -- Each vocation has its own Priority Sio names and % (the druid one keeps the
+  -- old Party Sio key, so saved names and % stay).
+  local panelName = o.priorityKey
+  local MEMBER_COUNT = 4
+
+  storage[panelName] = storage[panelName] or {}
+  local cfg = storage[panelName]
+
+  if cfg.enabled == nil then cfg.enabled = false end
+
+  cfg.self = cfg.self or {}
+  cfg.self.hp = cfg.self.hp or 60
+
+  cfg.spells = cfg.spells or {}
+  -- Spells always come from the options (never from old saved values)
+  cfg.spells.sio          = o.spell
+  cfg.spells.gran         = o.gran
+  cfg.spells.granDelay    = cfg.spells.granDelay    or 60000 -- exura gran sio cooldown (ms), fallback only
+  cfg.spells.sioMana      = o.sioMana or 0               -- sio mana cost (0 = no check)
+  cfg.spells.granMana     = o.granMana or 0              -- strong sio mana cost
+  cfg.spells.healGroupId  = cfg.spells.healGroupId  or 2     -- client spell group: healing
+  cfg.spells.pendingDelay = cfg.spells.pendingDelay or 500   -- lock after a cast while the server answers (ms)
+  cfg.spells.confirmDelay = cfg.spells.confirmDelay or 1000  -- max wait for the server to confirm Gran Sio (ms)
+  cfg.spells.granRetry    = cfg.spells.granRetry    or 5000  -- after a rejected Gran Sio, retry after (ms)
+  -- cfg.spells.granId is learned from the server the first time Gran Sio is cast.
+
+  local defaultSioHp = { 90, 80, 70, 70 }
+
+  cfg.members = cfg.members or {}
+  for i = 1, MEMBER_COUNT do
+    local m = cfg.members[i] or {}
+    m.priority = i
+    m.name  = m.name or ""
+    m.sioHp = m.sioHp or defaultSioHp[i]
+    m.useGran = (i == 1 and o.gran ~= nil)
+    if m.useGran then
+      m.granHp = m.granHp or 30
+    end
+    cfg.members[i] = m
+  end
+
+  -- Guild Sio settings
+  local guildConfig = {
+    listUrl        = "https://raw.githubusercontent.com/natansps/guild-lists/main/sio_list.txt", -- published by the guild bot
+    minManaPercent = 20,   -- do not cast below this mana %
+    maxDistance    = 7,    -- max distance (sqm) to the friend, same floor only
+    ignoreNames    = {},   -- never heal these, e.g. {"Someone"}
+  }
+
+  storage.guildSioExtra       = storage.guildSioExtra or ""
+  storage.guildSioHealPercent = storage.guildSioHealPercent or 70
+  storage.guildSioSelfPercent = storage.guildSioSelfPercent or 50
+  if storage.guildSioEnabled == nil then storage.guildSioEnabled = false end
+
+  -- =============================
+  -- COOLDOWNS (shared by both modes)
+  -- Tracks the real cooldowns from the server's cooldown events:
+  --  * healing group cooldown (shared by Sio, Gran Sio, Exura Vita, etc.)
+  --  * Gran Sio's own cooldown. Its client ID is learned automatically:
+  --    the first long cooldown the server sends right after a Gran Sio
+  --    cast belongs to Gran Sio.
+  -- If a Gran Sio cast gets no confirmation, it is treated as rejected
+  -- (still on cooldown) and only retried after granRetry, so Sio keeps
+  -- working in the meantime.
+  -- =============================
+
+  local castLock         = 0 -- short lock after any cast
+  local groupCdEnd       = 0 -- healing group cooldown end (from server)
+  local granCdEnd        = 0 -- Gran Sio cooldown end (from server)
+  local granRetryAt      = 0 -- next Gran Sio attempt after a rejected cast
+  local granPendingSince = 0 -- time of an unconfirmed Gran Sio cast (0 = none)
+
+  local cdModule = modules.game_cooldown
+
+  local function clientGroupCd()
+    return cdModule ~= nil
+      and type(cdModule.isGroupCooldownIconActive) == "function"
+      and cdModule.isGroupCooldownIconActive(cfg.spells.healGroupId)
+  end
+
+  local function clientGranCd()
+    return cfg.spells.granId ~= nil
+      and cdModule ~= nil
+      and type(cdModule.isCooldownIconActive) == "function"
+      and cdModule.isCooldownIconActive(cfg.spells.granId)
+  end
+
+  local function granPending()
+    return granPendingSince > 0
+      and now - granPendingSince <= cfg.spells.confirmDelay
+  end
+
+  onGroupSpellCooldown(function(groupId, duration)
+    if groupId ~= cfg.spells.healGroupId then return end
+    groupCdEnd = now + duration
+
+    -- Group cooldown right after our Gran Sio = the cast went through.
+    -- Used only while the Gran Sio ID is still unknown.
+    if granPending() and not cfg.spells.granId then
+      granCdEnd = now + cfg.spells.granDelay
+      granPendingSince = 0
     end
   end)
 
-  UI.Button("Friend List", editFriendList)
+  onSpellCooldown(function(spellId, duration)
+    -- Learn the Gran Sio ID: a long cooldown right after our Gran Sio cast.
+    if granPending() and duration >= 10000 and cfg.spells.granId ~= spellId then
+      cfg.spells.granId = spellId
+    end
 
-  -- Quick add: type the name and click (same name again removes it)
-  local quickName = ""
-  local quickEdit = UI.TextEdit("", function(widget, text)
-    quickName = text
-  end)
-  quickEdit:setTooltip("Type a name and click Add / Remove")
-  UI.Button("Add / Remove", function()
-    toggleFriend(quickName)
-    quickName = ""
-    quickEdit:setText("")
+    if spellId == cfg.spells.granId then
+      granCdEnd = now + duration
+      granPendingSince = 0
+    end
   end)
 
-  UI.Label("Friend min HP (%)")
-  UI.TextEdit(tostring(cfg.friendHP), function(widget, text)
-    local val = tonumber(text)
-    if val then cfg.friendHP = val end
+  local function groupReady()
+    return now >= castLock and now >= groupCdEnd and not clientGroupCd()
+  end
+
+  local function granCooldownReady()
+    return now >= granCdEnd and now >= granRetryAt
+      and not granPending() and not clientGranCd()
+  end
+
+  -- Called every tick: a Gran Sio cast that got no confirmation in time
+  -- was rejected by the server (it is on cooldown).
+  local function checkGranRejected()
+    if granPendingSince > 0 and not granPending() then
+      granPendingSince = 0
+      granRetryAt = now + cfg.spells.granRetry
+    end
+  end
+
+  local function castOn(spell, name, isGran)
+    if isSelf(name) then return end -- never sio yourself
+    say(spell .. ' "' .. name .. '"')
+    castLock = now + cfg.spells.pendingDelay
+    if isGran then
+      granPendingSince = now
+    end
+  end
+
+  -- =============================
+  -- PRIORITY SIO HELPERS
+  -- =============================
+
+  -- Checks whether 'name' is already used by another member (case-insensitive).
+  local function isDuplicateName(name, currentIndex)
+    local lname = name:lower()
+    for i, member in ipairs(cfg.members) do
+      if i ~= currentIndex and member.name:lower() == lname then
+        return true
+      end
+    end
+    return false
+  end
+
+  local function hasAnyName()
+    for _, member in ipairs(cfg.members) do
+      if member.name ~= "" then
+        return true
+      end
+    end
+    return false
+  end
+
+  -- =============================
+  -- GUILD SIO LISTS
+  -- =============================
+
+  local guildList, guildCount = {}, 0   -- from the URL (hidden)
+  local extraList, extraCount = {}, 0   -- edited by you
+  local lastUpdate, lastSource = nil, "none"
+  local statusLabel
+
+  local ignored = {}
+  for _, n in ipairs(guildConfig.ignoreNames) do ignored[n:lower()] = true end
+
+  -- Parses text with one name per line; empty lines and lines starting with # are ignored
+  local function parseNames(text)
+    local list, count = {}, 0
+    for line in (text or ""):gmatch("[^\r\n]+") do
+      local name = trim(line)
+      if name ~= "" and name:sub(1, 1) ~= "#" then
+        local key = name:lower()
+        if not list[key] then
+          list[key] = true
+          count = count + 1
+        end
+      end
+    end
+    return list, count
+  end
+
+  local function isGuildFriend(name)
+    if isSelf(name) then return false end
+    local key = name:lower()
+    if ignored[key] then return false end
+    return guildList[key] or extraList[key] or false
+  end
+
+  local function capitalize(s)
+    return s:sub(1, 1):upper() .. s:sub(2)
+  end
+
+  local function updateStatus()
+    if not statusLabel then return end
+    statusLabel.guild:setText("Guild members: " .. guildCount)
+    statusLabel.extra:setText("Extra: " .. extraCount)
+    if lastUpdate then
+      statusLabel.source:setText(capitalize(lastSource) .. " " .. os.date("%d/%m %H:%M", lastUpdate))
+    else
+      statusLabel.source:setText("No list loaded")
+    end
+  end
+
+  local function cachePath()
+    local configName = modules.game_bot.contentsPanel.config:getCurrentOption().text
+    return "/bot/" .. configName .. "/guild_sio_list.txt"
+  end
+
+  local function applyGuildList(text, source)
+    local list, count = parseNames(text)
+    if count == 0 then return false end
+    guildList, guildCount = list, count
+    if source == "online" then
+      storage.guildSioDownloaded = os.time()
+    end
+    -- show when the list was downloaded, also when it comes from the cache
+    lastSource, lastUpdate = source, storage.guildSioDownloaded or os.time()
+    updateStatus()
+    return true
+  end
+
+  local function applyExtraList(text)
+    extraList, extraCount = parseNames(text)
+    updateStatus()
+  end
+
+  local function loadCache()
+    local path = cachePath()
+    if g_resources.fileExists(path) then
+      applyGuildList(g_resources.readFileContents(path), "cache")
+    end
+  end
+
+  local fetching = false
+  local function fetchList()
+    if fetching then return end
+    if not HTTP then
+      warn("[Sio] HTTP module not available in this client - using " .. lastSource .. " list")
+      return
+    end
+    fetching = true
+    local url = guildConfig.listUrl
+    local sep = url:find("?", 1, true) and "&" or "?"
+    HTTP.get(url .. sep .. "t=" .. os.time(), function(data, err)
+      fetching = false
+      -- names never contain "<", so this also rejects HTML error pages
+      if err or not data or data == "" or data:find("<", 1, true) then
+        warn("[Sio] Download failed (" .. tostring(err or "invalid content") .. ") - using " .. lastSource .. " list")
+        return
+      end
+      if applyGuildList(data, "online") then
+        g_resources.writeFileContents(cachePath(), data)
+      end
+    end)
+  end
+
+  local function addExtraName(raw)
+    local name = trim(trim(raw):gsub('^"(.*)"$', "%1"))
+    if name == "" then
+      notify("Usage: !add Character Name")
+      return
+    end
+    if isSelf(name) then
+      notify("You can't sio yourself")
+      return
+    end
+    if extraList[name:lower()] then
+      notify(name .. " is already in Extra names")
+      return
+    end
+    if guildList[name:lower()] then
+      notify(name .. " is already in the guild list")
+      return
+    end
+    local text = trim(storage.guildSioExtra)
+    storage.guildSioExtra = (text == "" and name) or (text .. "\n" .. name)
+    applyExtraList(storage.guildSioExtra)
+    notify("Added " .. name .. " to Extra names")
+  end
+
+  local function removeExtraName(name)
+    local key = trim(name):lower()
+    if not extraList[key] then
+      notify(name .. " is not in Extra names")
+      return
+    end
+    local kept = {}
+    for line in (storage.guildSioExtra or ""):gmatch("[^\r\n]+") do
+      if trim(line):lower() ~= key then
+        kept[#kept + 1] = line
+      end
+    end
+    storage.guildSioExtra = table.concat(kept, "\n")
+    applyExtraList(storage.guildSioExtra)
+    notify("Removed " .. name .. " from Extra names")
+  end
+
+  -- =============================
+  -- MODE SWITCH: only one mode on at a time
+  -- =============================
+
+  local partyUi, guildUi
+
+  -- mode: "party", "guild" or nil (both off)
+  local function setMode(mode)
+    local wasParty, wasGuild = cfg.enabled, storage.guildSioEnabled
+    cfg.enabled = (mode == "party")
+    storage.guildSioEnabled = (mode == "guild")
+    if partyUi then partyUi.title:setOn(cfg.enabled) end
+    if guildUi then guildUi.title:setOn(storage.guildSioEnabled) end
+
+    if mode == "party" and wasGuild then
+      notify("Guild Sio turned off - Priority Sio is on (only one at a time)")
+    elseif mode == "guild" and wasParty then
+      notify("Priority Sio turned off - Guild Sio is on (only one at a time)")
+    end
+  end
+
+  -- Repair the saved state on load: never both on, and Priority Sio needs a name.
+  if cfg.enabled and storage.guildSioEnabled then
+    storage.guildSioEnabled = false
+  end
+  if cfg.enabled and not hasAnyName() then
+    cfg.enabled = false
+  end
+
+  -- =============================
+  -- PANEL: Priority Sio
+  -- =============================
+
+  partyUi = setupUI([[
+Panel
+  height: 19
+
+  BotSwitch
+    id: title
+    anchors.top: parent.top
+    anchors.left: parent.left
+    text-align: center
+    width: 100
+    text: Priority Sio
+    font: verdana-11px-rounded
+
+  Button
+    id: setup
+    anchors.top: prev.top
+    anchors.left: prev.right
+    anchors.right: parent.right
+    margin-left: 3
+    height: 17
+    text: Setup
+    font: verdana-11px-rounded
+]])
+  partyUi:setId(panelName)
+  partyUi.title:setOn(cfg.enabled)
+
+  partyUi.title.onClick = function(widget)
+    if cfg.enabled then
+      setMode(nil)
+      return
+    end
+    -- A name is only required to turn ON; turning OFF is always allowed.
+    if not hasAnyName() then
+      warn("Priority Sio: set at least one name first.")
+      widget:setOn(false)
+      return
+    end
+    setMode("party")
+  end
+
+  -- Config window (inside a function so the safety "return"s only stop this part)
+  ;(function()
+  local rootWidget = g_ui.getRootWidget()
+  if not rootWidget then
+    warn("PrioritySio: rootWidget is nil")
+    return
+  end
+
+  local partyWindow = UI.createWindow("PrioritySioWindow", rootWidget)
+  if not partyWindow then
+    warn("PrioritySio: priorityWindow is nil")
+    return
+  end
+
+  partyWindow:hide()
+
+  partyUi.setup.onClick = function()
+    partyWindow:show()
+    partyWindow:raise()
+    partyWindow:focus()
+  end
+
+  partyWindow.closeButton.onClick = function()
+    partyWindow:hide()
+  end
+
+  -- POPULATE: cfg -> UI
+  partyWindow.selfHp:setText(tostring(cfg.self.hp))
+
+  for i, member in ipairs(cfg.members) do
+    local nameWidget = partyWindow["p" .. i .. "name"]
+    if nameWidget then nameWidget:setText(member.name) end
+
+    local hpWidget = partyWindow["p" .. i .. "hp"]
+    if hpWidget then hpWidget:setText(tostring(member.sioHp)) end
+
+    if member.useGran then
+      local granWidget = partyWindow["p" .. i .. "gran"]
+      if granWidget then granWidget:setText(tostring(member.granHp)) end
+    end
+  end
+
+  -- CALLBACKS: UI -> cfg
+  partyWindow.selfHp.onTextChange = function(_, text)
+    cfg.self.hp = validPercent(text) or cfg.self.hp
+  end
+
+  -- Declarative field definitions per priority
+  local memberFields = {
+    --  index, ui_field, cfg_key, validator
+    { 1, "name", "name",   nil          },
+    { 1, "hp",   "sioHp",  validPercent },
+    { 2, "name", "name",   nil          },
+    { 2, "hp",   "sioHp",  validPercent },
+    { 3, "name", "name",   nil          },
+    { 3, "hp",   "sioHp",  validPercent },
+    { 4, "name", "name",   nil          },
+    { 4, "hp",   "sioHp",  validPercent },
+  }
+
+  if o.gran then
+    table.insert(memberFields, 3, { 1, "gran", "granHp", validPercent })
+  end
+
+  for _, def in ipairs(memberFields) do
+    local idx, uiField, cfgKey, validator = def[1], def[2], def[3], def[4]
+    local widget = partyWindow["p" .. idx .. uiField]
+    local member = cfg.members[idx]
+
+    if widget then
+      widget.onTextChange = function(_, text)
+        if validator then
+          member[cfgKey] = validator(text) or member[cfgKey]
+          return
+        end
+
+        local trimmed = trim(text)
+
+        -- Reject your own name: sio can't target yourself.
+        if trimmed ~= "" and isSelf(trimmed) then
+          warn("Priority Sio: you can't sio yourself (" .. trimmed .. ")")
+          widget:setText(member.name) -- revert to the saved value
+          return
+        end
+
+        -- Reject duplicate names (empty is always allowed).
+        if trimmed ~= "" and isDuplicateName(trimmed, idx) then
+          warn("Priority Sio: name already in use: " .. trimmed)
+          widget:setText(member.name) -- revert to the saved value
+          return
+        end
+
+        member.name = trimmed
+
+        -- If every name was cleared while enabled, turn off.
+        if cfg.enabled and not hasAnyName() then
+          setMode(nil)
+        end
+      end
+    end
+  end
+  end)()
+
+  -- =============================
+  -- PANEL: Guild Sio
+  -- =============================
+
+  g_ui.loadUIFromString([[
+GuildSioWindow < MainWindow
+  !text: tr('Guild Sio Config')
+  size: 300 330
+  @onEscape: self:hide()
+
+  Label
+    id: healTitle
+    text: Healing
+    anchors.top: parent.top
+    anchors.left: parent.left
+    margin-top: 10
+    margin-left: 10
+    color: #ffaa00
+
+  Label
+    id: healLabel
+    text: Heal friend at HP % (or below)
+    text-auto-resize: true
+    anchors.top: healTitle.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: healHp
+    anchors.left: healLabel.right
+    anchors.top: healLabel.top
+    margin-left: 10
+    width: 50
+
+  Label
+    id: selfLabel
+    text: Only if my HP is above %
+    text-auto-resize: true
+    anchors.top: healHp.bottom
+    anchors.left: parent.left
+    margin-top: 5
+    margin-left: 10
+
+  TextEdit
+    id: selfHp
+    anchors.left: healHp.left
+    anchors.top: selfLabel.top
+    width: 50
+
+  HorizontalSeparator
+    id: sep1
+    anchors.top: selfHp.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 10
+
+  Label
+    id: listTitle
+    text: Lists
+    anchors.top: sep1.bottom
+    anchors.left: parent.left
+    margin-top: 10
+    margin-left: 10
+    color: #ffaa00
+
+  Label
+    id: guildCount
+    text: Guild members: 0
+    anchors.top: listTitle.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 5
+    margin-left: 10
+
+  Label
+    id: extraCount
+    text: Extra: 0
+    anchors.top: guildCount.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 3
+    margin-left: 10
+
+  Label
+    id: listSource
+    text: No list loaded
+    anchors.top: extraCount.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 3
+    margin-left: 10
+
+  Button
+    id: refreshButton
+    text: Refresh Sio list
+    anchors.top: listSource.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 10
+    margin-left: 10
+    margin-right: 10
+
+  Button
+    id: editButton
+    text: Edit extra names
+    anchors.top: refreshButton.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    margin-top: 5
+    margin-left: 10
+    margin-right: 10
+
+  Button
+    id: closeButton
+    text: Close
+    anchors.horizontalCenter: parent.horizontalCenter
+    anchors.bottom: parent.bottom
+    margin-bottom: 5
+    width: 100
+]])
+
+  guildUi = setupUI([[
+Panel
+  height: 19
+
+  BotSwitch
+    id: title
+    anchors.top: parent.top
+    anchors.left: parent.left
+    text-align: center
+    width: 100
+    text: Guild Sio
+    font: verdana-11px-rounded
+
+  Button
+    id: setup
+    anchors.top: prev.top
+    anchors.left: prev.right
+    anchors.right: parent.right
+    margin-left: 3
+    height: 17
+    text: Setup
+    font: verdana-11px-rounded
+]])
+  guildUi:setId("GuildSio")
+  guildUi.title:setOn(storage.guildSioEnabled)
+
+  guildUi.title.onClick = function()
+    if storage.guildSioEnabled then
+      setMode(nil)
+    else
+      setMode("guild")
+    end
+  end
+
+  -- Config window (inside a function so the safety "return"s only stop this part)
+  ;(function()
+  local rootWidget = g_ui.getRootWidget()
+  if not rootWidget then
+    warn("GuildSio: rootWidget is nil")
+    return
+  end
+
+  local guildWindow = UI.createWindow("GuildSioWindow", rootWidget)
+  if not guildWindow then
+    warn("GuildSio: guildWindow is nil")
+    return
+  end
+
+  guildWindow:hide()
+
+  guildUi.setup.onClick = function()
+    guildWindow:show()
+    guildWindow:raise()
+    guildWindow:focus()
+  end
+
+  guildWindow.closeButton.onClick = function()
+    guildWindow:hide()
+  end
+
+  -- POPULATE + CALLBACKS
+  guildWindow.healHp:setText(tostring(storage.guildSioHealPercent))
+  guildWindow.selfHp:setText(tostring(storage.guildSioSelfPercent))
+
+  guildWindow.healHp.onTextChange = function(_, text)
+    storage.guildSioHealPercent = validPercent(text) or storage.guildSioHealPercent
+  end
+
+  guildWindow.selfHp.onTextChange = function(_, text)
+    storage.guildSioSelfPercent = validPercent(text) or storage.guildSioSelfPercent
+  end
+
+  statusLabel = {
+    guild  = guildWindow.guildCount,
+    extra  = guildWindow.extraCount,
+    source = guildWindow.listSource,
+  }
+
+  guildWindow.refreshButton.onClick = function()
+    fetchList()
+  end
+
+  guildWindow.editButton.onClick = function()
+    if not UI.MultilineEditorWindow then
+      warn("[Sio] Text editor window not available in this vBot version")
+      return
+    end
+    UI.MultilineEditorWindow(storage.guildSioExtra, {
+      title = "Guild Sio - Extra names",
+      description = "One character name per line.\nThese are healed together with the guild list.\n"
+        .. "You can also type !add Character Name in the chat to add a name,\n"
+        .. "or right-click a player and choose Add to / Remove from Sio List.",
+    }, function(text)
+      storage.guildSioExtra = text
+      applyExtraList(text)
+    end)
+  end
+  end)()
+
+  -- =============================
+  -- RIGHT-CLICK MENU on players (map and battle list):
+  -- "Add to Sio List" / "Remove from Sio List" change the Extra names.
+  -- =============================
+
+  local gameInterface = modules.game_interface
+  if gameInterface and gameInterface.addMenuHook then
+    local function otherPlayer(creature)
+      if creature and creature:isPlayer() and not isSelf(creature) then
+        return creature
+      end
+    end
+
+    -- re-adding with the same category and name replaces the old entry on bot reload
+    gameInterface.addMenuHook("guildSio", "Add to Sio List",
+      function(menuPosition, lookThing, useThing, creatureThing)
+        addExtraName(creatureThing:getName())
+      end,
+      function(menuPosition, lookThing, useThing, creatureThing)
+        local c = otherPlayer(creatureThing)
+        if not c then return false end
+        local key = c:getName():lower()
+        -- guild members are already healed, so the option only shows for others
+        return not extraList[key] and not guildList[key]
+      end)
+
+    gameInterface.addMenuHook("guildSio", "Remove from Sio List",
+      function(menuPosition, lookThing, useThing, creatureThing)
+        removeExtraName(creatureThing:getName())
+      end,
+      function(menuPosition, lookThing, useThing, creatureThing)
+        local c = otherPlayer(creatureThing)
+        return c ~= nil and extraList[c:getName():lower()] == true
+      end)
+  else
+    warn("[Sio] Right-click menu not available - use !add or Edit extra names")
+  end
+
+  -- =============================
+  -- !add COMMAND: "!add Character Name" in the chat adds to Extra names.
+  -- Handled by the bot and never sent to the server.
+  -- =============================
+
+  local console = modules.game_console
+  if console and console.sendMessage then
+    -- keep the client's original function so reloading the bot does not stack hooks
+    console.guildSioOriginalSend = console.guildSioOriginalSend or console.sendMessage
+    console.guildSioAdd = addExtraName
+    local original = console.guildSioOriginalSend
+    console.sendMessage = function(message, tab)
+      if type(message) == "string" then
+        local lower = message:lower()
+        if lower:match("^%s*!add%s*$") or lower:match("^%s*!add%s") then
+          console.guildSioAdd(message:match("^%s*!%a+%s*(.*)$"))
+          return
+        end
+      end
+      return original(message, tab)
+    end
+  else
+    warn("[Sio] Could not hook the chat - !add command disabled")
+  end
+
+  -- =============================
+  -- MAIN LOOP
+  -- =============================
+
+  -- Priority Sio: Gran Sio on the tank first, then Sio by priority order.
+  local function partyTick(canHeal, sioReady, myMana)
+    -- Self protection: with low HP, don't spend turns healing others.
+    if hppercent() <= cfg.self.hp then return end
+
+    local granReady = o.gran ~= nil and canHeal and myMana >= cfg.spells.granMana
+                      and granCooldownReady()
+    if not sioReady and not granReady then return end
+
+    -- Map visible players on the SAME floor (sio can't reach other floors).
+    local myZ = posz()
+    local targets = {}
+    for _, spec in ipairs(getSpectators()) do
+      if spec:isPlayer() and not isSelf(spec) and spec:getPosition().z == myZ then
+        targets[spec:getName():lower()] = spec
+      end
+    end
+
+    -- GRAN SIO (tank only). If the tank is in Gran Sio range but Gran Sio is
+    -- unavailable (not enough mana or on cooldown), use Sio on the tank instead.
+    local tank = cfg.members[1]
+    if tank.useGran and tank.name ~= "" then
+      local target = targets[tank.name:lower()]
+      if target then
+        local hp = target:getHealthPercent()
+        if hp > 0 and hp <= tank.granHp then
+          if granReady then
+            castOn(cfg.spells.gran, target:getName(), true)
+            return
+          elseif sioReady then
+            castOn(cfg.spells.sio, target:getName(), false)
+            return
+          end
+        end
+      end
+    end
+
+    -- SIO (by priority order)
+    if sioReady then
+      for _, member in ipairs(cfg.members) do
+        if member.name ~= "" then
+          local target = targets[member.name:lower()]
+          if target then
+            local hp = target:getHealthPercent()
+            if hp > 0 and hp <= member.sioHp then
+              castOn(cfg.spells.sio, target:getName(), false)
+              return
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- Guild Sio: Sio on whoever is lowest among the guild list and Extra names.
+  local function guildTick(sioReady)
+    if not sioReady then return end
+    if guildCount == 0 and extraCount == 0 then return end
+    if hppercent() < storage.guildSioSelfPercent then return end
+    if manapercent() < guildConfig.minManaPercent then return end
+
+    local myPos = pos()
+    local healPercent = storage.guildSioHealPercent
+    local target, lowest = nil, healPercent + 1
+
+    for _, spec in ipairs(getSpectators()) do
+      if spec:isPlayer() and not isSelf(spec) then
+        local hp = spec:getHealthPercent()
+        if hp > 0 and hp <= healPercent and hp < lowest and isGuildFriend(spec:getName()) then
+          local specPos = spec:getPosition()
+          if specPos.z == myPos.z and getDistanceBetween(myPos, specPos) <= guildConfig.maxDistance then
+            target, lowest = spec, hp
+          end
+        end
+      end
+    end
+
+    if target then
+      castOn(cfg.spells.sio, target:getName(), false)
+    end
+  end
+
+  macro(100, function()
+    checkGranRejected()
+
+    local party, guild = cfg.enabled, storage.guildSioEnabled
+    if not party and not guild then return end
+
+    -- Sio's own cooldown equals the healing group cooldown,
+    -- so the group check is enough for it.
+    local myMana   = mana()
+    local canHeal  = groupReady()
+    local sioReady = canHeal and myMana >= cfg.spells.sioMana
+
+    -- setMode() never leaves both on; if it ever happens, Priority Sio wins.
+    if party then
+      partyTick(canHeal, sioReady, myMana)
+    else
+      guildTick(sioReady)
+    end
   end)
 
-  UI.Label("My min HP (%)")
-  UI.TextEdit(tostring(cfg.selfHP), function(widget, text)
-    local val = tonumber(text)
-    if val then cfg.selfHP = val end
-  end)
+  -- =============================
+  -- STARTUP
+  -- =============================
+  applyExtraList(storage.guildSioExtra)
+  loadCache()
+  updateStatus()
 end
 </script>
 <script type="text/x-lua" data-kind="helper" data-id="stance_data">
@@ -2689,664 +3839,18 @@ HuntConfigWindow < MainWindow
   UI.Button("Hunt Config", openConfig)
 end
 </script>
-<script type="text/x-lua" data-kind="block" data-id="healfriend">
-storage.friendHeal = storage.friendHeal or {friendHP = 80, selfHP = 95}
-addHealFriend({
-  title = "Exura Sio", macroName = "Heal Friend",
-  spell = "exura sio", cfgKey = "friendHeal",
+<script type="text/x-lua" data-kind="block" data-id="sio">
+addSioModes({
+  spell = "exura sio", gran = "exura gran sio",
+  sioMana = 260, granMana = 400,
+  priorityKey = "PartySio", -- old Party Sio key: saved names and % stay
 })
 </script>
-<script type="text/x-lua" data-kind="block" data-id="partysio">
--- Party Sio: exura sio / exura gran sio by priority (tank = priority 1).
--- Config window via the Setup button.
-
-g_ui.loadUIFromString([[
-PartySioWindow < MainWindow
-  !text: tr('Party Sio Config')
-  size: 350 610
-  @onEscape: self:hide()
-
-  Label
-    id: selfTitle
-    text: Self Protection
-    anchors.top: parent.top
-    anchors.left: parent.left
-    margin-top: 10
-    margin-left: 10
-    color: #ffaa00
-
-  Label
-    id: selfHpLabel
-    text: Pause if my HP <=
-    anchors.top: selfTitle.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: selfHp
-    anchors.left: selfHpLabel.right
-    anchors.top: selfHpLabel.top
-    margin-left: 10
-    width: 50
-
-  HorizontalSeparator
-    id: sep1
-    anchors.top: selfHp.bottom
-    anchors.left: parent.left
-    anchors.right: parent.right
-    margin-top: 10
-
-  Label
-    id: p1title
-    text: Tank (Priority 1)
-    anchors.top: sep1.bottom
-    anchors.left: parent.left
-    margin-top: 10
-    margin-left: 10
-    color: #ffaa00
-
-  Label
-    id: p1nameLabel
-    text: Name
-    anchors.top: p1title.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p1name
-    anchors.top: p1nameLabel.bottom
-    anchors.left: parent.left
-    margin-top: 2
-    margin-left: 10
-    width: 200
-
-  Label
-    id: p1hpLabel
-    text: Sio HP
-    anchors.top: p1name.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p1hp
-    anchors.left: p1hpLabel.right
-    anchors.top: p1hpLabel.top
-    margin-left: 10
-    width: 50
-
-  Label
-    id: p1granLabel
-    text: Gran Sio HP
-    anchors.top: p1hp.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p1gran
-    anchors.left: p1granLabel.right
-    anchors.top: p1granLabel.top
-    margin-left: 10
-    width: 50
-
-  HorizontalSeparator
-    id: sep2
-    anchors.top: p1gran.bottom
-    anchors.left: parent.left
-    anchors.right: parent.right
-    margin-top: 10
-
-  Label
-    id: p2title
-    text: Priority 2
-    anchors.top: sep2.bottom
-    anchors.left: parent.left
-    margin-top: 10
-    margin-left: 10
-    color: #ffaa00
-
-  Label
-    id: p2nameLabel
-    text: Name
-    anchors.top: p2title.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p2name
-    anchors.top: p2nameLabel.bottom
-    anchors.left: parent.left
-    margin-top: 2
-    margin-left: 10
-    width: 200
-
-  Label
-    id: p2hpLabel
-    text: Sio HP
-    anchors.top: p2name.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p2hp
-    anchors.left: p2hpLabel.right
-    anchors.top: p2hpLabel.top
-    margin-left: 10
-    width: 50
-
-  HorizontalSeparator
-    id: sep3
-    anchors.top: p2hp.bottom
-    anchors.left: parent.left
-    anchors.right: parent.right
-    margin-top: 10
-
-  Label
-    id: p3title
-    text: Priority 3
-    anchors.top: sep3.bottom
-    anchors.left: parent.left
-    margin-top: 10
-    margin-left: 10
-    color: #ffaa00
-
-  Label
-    id: p3nameLabel
-    text: Name
-    anchors.top: p3title.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p3name
-    anchors.top: p3nameLabel.bottom
-    anchors.left: parent.left
-    margin-top: 2
-    margin-left: 10
-    width: 200
-
-  Label
-    id: p3hpLabel
-    text: Sio HP
-    anchors.top: p3name.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p3hp
-    anchors.left: p3hpLabel.right
-    anchors.top: p3hpLabel.top
-    margin-left: 10
-    width: 50
-
-  HorizontalSeparator
-    id: sep4
-    anchors.top: p3hp.bottom
-    anchors.left: parent.left
-    anchors.right: parent.right
-    margin-top: 10
-
-  Label
-    id: p4title
-    text: Priority 4
-    anchors.top: sep4.bottom
-    anchors.left: parent.left
-    margin-top: 10
-    margin-left: 10
-    color: #ffaa00
-
-  Label
-    id: p4nameLabel
-    text: Name
-    anchors.top: p4title.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p4name
-    anchors.top: p4nameLabel.bottom
-    anchors.left: parent.left
-    margin-top: 2
-    margin-left: 10
-    width: 200
-
-  Label
-    id: p4hpLabel
-    text: Sio HP
-    anchors.top: p4name.bottom
-    anchors.left: parent.left
-    margin-top: 5
-    margin-left: 10
-
-  TextEdit
-    id: p4hp
-    anchors.left: p4hpLabel.right
-    anchors.top: p4hpLabel.top
-    margin-left: 10
-    width: 50
-
-  Button
-    id: closeButton
-    text: Close
-    anchors.horizontalCenter: parent.horizontalCenter
-    anchors.bottom: parent.bottom
-    margin-bottom: 5
-    width: 100
-]])
-
--- =============================
--- STORAGE
--- =============================
-
-local panelName = "PartySio"
-local MEMBER_COUNT = 4
-
-storage[panelName] = storage[panelName] or {}
-local cfg = storage[panelName]
-
--- Defaults applied field by field: repairs old/incomplete storage
--- without overwriting what the user already configured.
-if cfg.enabled == nil then cfg.enabled = false end
-
-cfg.self = cfg.self or {}
-cfg.self.hp = cfg.self.hp or 60
-
-cfg.spells = cfg.spells or {}
-cfg.spells.sio        = cfg.spells.sio        or "exura sio"
-cfg.spells.gran       = cfg.spells.gran       or "exura gran sio"
-cfg.spells.granDelay  = cfg.spells.granDelay  or 60000  -- exura gran sio cooldown (ms), fallback only
-cfg.spells.sioMana    = cfg.spells.sioMana    or 260    -- exura sio mana cost
-cfg.spells.granMana   = cfg.spells.granMana   or 400    -- exura gran sio mana cost
-cfg.spells.healGroupId  = cfg.spells.healGroupId  or 2    -- client spell group: healing
-cfg.spells.pendingDelay = cfg.spells.pendingDelay or 500  -- lock after a cast while the server answers (ms)
-cfg.spells.confirmDelay = cfg.spells.confirmDelay or 1000 -- max wait for the server to confirm Gran Sio (ms)
-cfg.spells.granRetry    = cfg.spells.granRetry    or 5000 -- after a rejected Gran Sio, retry after (ms)
--- cfg.spells.granId is learned from the server the first time Gran Sio is cast.
-
-local defaultSioHp = { 90, 80, 70, 70 }
-
-cfg.members = cfg.members or {}
-for i = 1, MEMBER_COUNT do
-  local m = cfg.members[i] or {}
-  m.priority = i
-  m.name  = m.name or ""
-  m.sioHp = m.sioHp or defaultSioHp[i]
-  m.useGran = (i == 1)
-  if m.useGran then
-    m.granHp = m.granHp or 30
-  end
-  cfg.members[i] = m
-end
-
-local castLock         = 0 -- short lock after any cast
-local groupCdEnd       = 0 -- healing group cooldown end (from server)
-local granCdEnd        = 0 -- Gran Sio cooldown end (from server)
-local granRetryAt      = 0 -- next Gran Sio attempt after a rejected cast
-local granPendingSince = 0 -- time of an unconfirmed Gran Sio cast (0 = none)
-
--- =============================
--- HELPERS
--- =============================
-
-local function trim(text)
-  return (text or ""):match("^%s*(.-)%s*$")
-end
-
--- Validates a percentage (1-100); returns the value or nil if invalid.
-local function validPercent(text)
-  local v = tonumber(text or "")
-  if v and v >= 1 and v <= 100 then
-    return v
-  end
-  return nil
-end
-
--- Checks whether 'name' is already used by another member (case-insensitive).
-local function isDuplicateName(name, currentIndex)
-  local lname = name:lower()
-  for i, member in ipairs(cfg.members) do
-    if i ~= currentIndex and member.name:lower() == lname then
-      return true
-    end
-  end
-  return false
-end
-
-local function hasAnyName()
-  for _, member in ipairs(cfg.members) do
-    if member.name ~= "" then
-      return true
-    end
-  end
-  return false
-end
-
--- =============================
--- COOLDOWNS
--- Tracks the real cooldowns from the server's cooldown events:
---  * healing group cooldown (shared by Sio, Gran Sio, Exura Vita, etc.)
---  * Gran Sio's own cooldown. Its client ID is learned automatically:
---    the first long cooldown the server sends right after a Gran Sio
---    cast belongs to Gran Sio.
--- If a Gran Sio cast gets no confirmation, it is treated as rejected
--- (still on cooldown) and only retried after granRetry, so Sio keeps
--- working in the meantime.
--- =============================
-
-local cdModule = modules.game_cooldown
-
-local function clientGroupCd()
-  return cdModule ~= nil
-    and type(cdModule.isGroupCooldownIconActive) == "function"
-    and cdModule.isGroupCooldownIconActive(cfg.spells.healGroupId)
-end
-
-local function clientGranCd()
-  return cfg.spells.granId ~= nil
-    and cdModule ~= nil
-    and type(cdModule.isCooldownIconActive) == "function"
-    and cdModule.isCooldownIconActive(cfg.spells.granId)
-end
-
-local function granPending()
-  return granPendingSince > 0
-    and now - granPendingSince <= cfg.spells.confirmDelay
-end
-
-onGroupSpellCooldown(function(groupId, duration)
-  if groupId ~= cfg.spells.healGroupId then return end
-  groupCdEnd = now + duration
-
-  -- Group cooldown right after our Gran Sio = the cast went through.
-  -- Used only while the Gran Sio ID is still unknown.
-  if granPending() and not cfg.spells.granId then
-    granCdEnd = now + cfg.spells.granDelay
-    granPendingSince = 0
-  end
-end)
-
-onSpellCooldown(function(spellId, duration)
-  -- Learn the Gran Sio ID: a long cooldown right after our Gran Sio cast.
-  if granPending() and duration >= 10000 and cfg.spells.granId ~= spellId then
-    cfg.spells.granId = spellId
-  end
-
-  if spellId == cfg.spells.granId then
-    granCdEnd = now + duration
-    granPendingSince = 0
-  end
-end)
-
-local function groupReady()
-  return now >= castLock and now >= groupCdEnd and not clientGroupCd()
-end
-
-local function granCooldownReady()
-  return now >= granCdEnd and now >= granRetryAt
-    and not granPending() and not clientGranCd()
-end
-
--- Called every tick: a Gran Sio cast that got no confirmation in time
--- was rejected by the server (it is on cooldown).
-local function checkGranRejected()
-  if granPendingSince > 0 and not granPending() then
-    granPendingSince = 0
-    granRetryAt = now + cfg.spells.granRetry
-  end
-end
-
-local function castOn(spell, name, isGran)
-  if Jujuba.isSelf(name) then return end -- never sio yourself
-  say(spell .. ' "' .. name .. '"')
-  castLock = now + cfg.spells.pendingDelay
-  if isGran then
-    granPendingSince = now
-  end
-end
-
--- =============================
--- PANEL (bot button)
--- =============================
-
-local ui = setupUI([[
-Panel
-  height: 19
-
-  BotSwitch
-    id: title
-    anchors.top: parent.top
-    anchors.left: parent.left
-    text-align: center
-    width: 100
-    text: Party Sio
-    font: verdana-11px-rounded
-
-  Button
-    id: setup
-    anchors.top: prev.top
-    anchors.left: prev.right
-    anchors.right: parent.right
-    margin-left: 3
-    height: 17
-    text: Setup
-    font: verdana-11px-rounded
-]])
-ui:setId(panelName)
-
--- Don't stay enabled after reload if the list is empty.
-if cfg.enabled and not hasAnyName() then
-  cfg.enabled = false
-end
-ui.title:setOn(cfg.enabled)
-
-ui.title.onClick = function(widget)
-  -- A name is only required to turn ON; turning OFF is always allowed.
-  if not cfg.enabled and not hasAnyName() then
-    warn("Party Sio: set at least one name first.")
-    widget:setOn(false)
-    return
-  end
-
-  cfg.enabled = not cfg.enabled
-  widget:setOn(cfg.enabled)
-end
-
--- =============================
--- CONFIG WINDOW
--- =============================
-
--- Runs inside a function so the safety "return"s below only stop this macro
-;(function()
-local rootWidget = g_ui.getRootWidget()
-if not rootWidget then
-  warn("PartySio: rootWidget is nil")
-  return
-end
-
-local partyWindow = UI.createWindow("PartySioWindow", rootWidget)
-if not partyWindow then
-  warn("PartySio: partyWindow is nil")
-  return
-end
-
-partyWindow:hide()
-
-ui.setup.onClick = function()
-  partyWindow:show()
-  partyWindow:raise()
-  partyWindow:focus()
-end
-
-partyWindow.closeButton.onClick = function()
-  partyWindow:hide()
-end
-
--- =============================
--- POPULATE — cfg -> UI
--- =============================
-
-partyWindow.selfHp:setText(tostring(cfg.self.hp))
-
-for i, member in ipairs(cfg.members) do
-  local nameWidget = partyWindow["p" .. i .. "name"]
-  if nameWidget then nameWidget:setText(member.name) end
-
-  local hpWidget = partyWindow["p" .. i .. "hp"]
-  if hpWidget then hpWidget:setText(tostring(member.sioHp)) end
-
-  if member.useGran then
-    local granWidget = partyWindow["p" .. i .. "gran"]
-    if granWidget then granWidget:setText(tostring(member.granHp)) end
-  end
-end
-
--- =============================
--- CALLBACKS — UI -> cfg
--- =============================
-
-partyWindow.selfHp.onTextChange = function(_, text)
-  cfg.self.hp = validPercent(text) or cfg.self.hp
-end
-
--- Declarative field definitions per priority
-local memberFields = {
-  --  index, ui_field, cfg_key, validator
-  { 1, "name", "name",   nil          },
-  { 1, "hp",   "sioHp",  validPercent },
-  { 1, "gran", "granHp", validPercent },
-  { 2, "name", "name",   nil          },
-  { 2, "hp",   "sioHp",  validPercent },
-  { 3, "name", "name",   nil          },
-  { 3, "hp",   "sioHp",  validPercent },
-  { 4, "name", "name",   nil          },
-  { 4, "hp",   "sioHp",  validPercent },
-}
-
-for _, def in ipairs(memberFields) do
-  local idx, uiField, cfgKey, validator = def[1], def[2], def[3], def[4]
-  local widget = partyWindow["p" .. idx .. uiField]
-  local member = cfg.members[idx]
-
-  if widget then
-    widget.onTextChange = function(_, text)
-      if validator then
-        member[cfgKey] = validator(text) or member[cfgKey]
-        return
-      end
-
-      local trimmed = trim(text)
-
-      -- Reject your own name: sio can't target yourself.
-      if trimmed ~= "" and Jujuba.isSelf(trimmed) then
-        warn("Party Sio: you can't sio yourself (" .. trimmed .. ")")
-        widget:setText(member.name) -- revert to the saved value
-        return
-      end
-
-      -- Reject duplicate names (empty is always allowed).
-      if trimmed ~= "" and isDuplicateName(trimmed, idx) then
-        warn("Party Sio: name already in use: " .. trimmed)
-        widget:setText(member.name) -- revert to the saved value
-        return
-      end
-
-      member.name = trimmed
-
-      -- If every name was cleared while enabled, turn off.
-      if cfg.enabled and not hasAnyName() then
-        cfg.enabled = false
-        ui.title:setOn(false)
-      end
-    end
-  end
-end
-
--- =============================
--- MAIN LOOP
--- =============================
-
-macro(100, function()
-  checkGranRejected()
-
-  if not cfg.enabled then return end
-
-  -- Self protection: with low HP, don't spend turns healing others.
-  if hppercent() <= cfg.self.hp then return end
-
-  -- Sio's own cooldown equals the healing group cooldown,
-  -- so the group check is enough for it.
-  local myMana = mana()
-  local canHeal   = groupReady()
-  local sioReady  = canHeal and myMana >= cfg.spells.sioMana
-  local granReady = canHeal and myMana >= cfg.spells.granMana
-                    and granCooldownReady()
-  if not sioReady and not granReady then return end
-
-  -- Map visible players on the SAME floor (sio can't reach other floors).
-  local myZ = posz()
-  local targets = {}
-  for _, spec in ipairs(getSpectators()) do
-    if spec:isPlayer() and not spec:isLocalPlayer() and not Jujuba.isSelf(spec)
-       and spec:getPosition().z == myZ then
-      targets[spec:getName():lower()] = spec
-    end
-  end
-
-  -- GRAN SIO (tank only)
-  -- If the tank is in Gran Sio range but Gran Sio is unavailable
-  -- (not enough mana or on cooldown), use Sio on the tank instead.
-  local tank = cfg.members[1]
-  if tank.name ~= "" then
-    local target = targets[tank.name:lower()]
-    if target then
-      local hp = target:getHealthPercent()
-      if hp > 0 and hp <= tank.granHp then
-        if granReady then
-          castOn(cfg.spells.gran, target:getName(), true)
-          return
-        elseif sioReady then
-          castOn(cfg.spells.sio, target:getName(), false)
-          return
-        end
-      end
-    end
-  end
-
-  -- SIO (by priority order)
-  if sioReady then
-    for _, member in ipairs(cfg.members) do
-      if member.name ~= "" then
-        local target = targets[member.name:lower()]
-        if target then
-          local hp = target:getHealthPercent()
-          if hp > 0 and hp <= member.sioHp then
-            castOn(cfg.spells.sio, target:getName(), false)
-            return
-          end
-        end
-      end
-    end
-  end
-end)
-end)()
-</script>
-<script type="text/x-lua" data-kind="block" data-id="healfriendtio">
--- na primeira carga, aproveita os valores do Exura Sio
-storage.friendHealTio = storage.friendHealTio or {
-  friendHP = (storage.friendHeal and storage.friendHeal.friendHP) or 80,
-  selfHP = (storage.friendHeal and storage.friendHeal.selfHP) or 95
-}
-addHealFriend({
-  title = "Exura Tio Sio", macroName = "Heal Friend Tio",
-  spell = "exura tio sio", cfgKey = "friendHealTio",
+<script type="text/x-lua" data-kind="block" data-id="siotio">
+addSioModes({
+  spell = "exura tio sio", -- monk has no strong sio for the tank
+  sioMana = 0,             -- 0 = no mana check (the server decides)
+  priorityKey = "PrioritySioTio",
 })
 </script>
 <script type="text/x-lua" data-kind="block" data-id="facemonster">
@@ -7297,7 +7801,7 @@ const MODE = {
 };
 const VOC_SET = { K: "K", P: "P", S: "S", D: "D", M: "M", mage: "SD", kp: "KP" };
 
-const HELPER_ORDER = ["items", "heal_spell", "antipush", "comma_value", "friends", "stance_data"];
+const HELPER_ORDER = ["items", "heal_spell", "antipush", "comma_value", "friends", "sio", "stance_data"];
 
 const SOURCES = ["Main", "HP", "Amulet", "Cave", "Tools", "PT", "Nav", "Outfit", "Extras"];
 
@@ -7331,9 +7835,8 @@ const MACROS = [
   // Tools
   { id: "haste", noPanel: true, name: "Haste", src: "Tools", req: ["items"], desc: "Sem nada na aba: tudo pelo ícone, que mostra a haste escolhida em verde quando ligado e vermelho quando desligado. Clique liga/desliga; Shift+clique troca a magia (Utani Hur e a haste forte da voc: Tempo Hur no knight, Tempo San no paladin, Gran Hur no sorcerer, druid e monk); Ctrl+arrastar move. Só solta andando e fora de PZ. Atalho na janela Hotkeys.", fix: "Antes ficava dentro do Hunt Config, com a lista de magias na aba; magia escolhida, liga/desliga, ícone e atalho salvos são aproveitados." },
   { id: "huntconfig", name: "Hunt Config", src: "Tools", req: ["items"], desc: "Botão “Hunt Config” na aba abre uma janela com uma linha por macro (switch + ajuste próprio), só com os da sua vocação: Utura Gran (Knight/Paladin), Exana Amp Res (Paladin, com ícone), Exori Mas Res (Monk, com ícone), Summon (não invoca se já tiver summon na tela), Auto Exeta Loot, Exeta (Knight: Res, Res Full, Amp Res ou Alternate, com ícone e atalho) e Fixed Point (Set Point e posição salva). Os switches acompanham ícones e atalhos.", fix: "Substitui os antigos Fixed Point, Auto Exeta Loot, Exeta Res, Exeta Amp Res, Exeta Res Full, Exana Amp Res, Exori Mas Res e Summon e a versão com grupo recolhível na aba; liga/desliga, modo do Exeta e Fixed Point salvos são aproveitados." },
-  { id: "healfriend", name: "Heal Friend (exura sio)", src: "Tools", voc: "D", req: ["friends"], desc: "Exura sio nos amigos da lista compartilhada (um por vez), com % do amigo e % mínima sua. Nunca solta sio no próprio personagem. Adição rápida de amigo: campo com nome + botão Add / Remove, comandos !add, !del e !friends digitados em qualquer aba do chat (não vão para o servidor; parte do nome serve se só um player na tela bater) e atalho “Friend List: add/remove player” para o player sob o mouse (ou o que você segue), com aviso no meio da tela." },
-  { id: "partysio", name: "Party Sio", src: "Tools", voc: "D", clash: ["healfriend"], clashMsg: "os dois soltam exura sio nos amigos e disputam a vez; use só um.", desc: "Switch “Party Sio” e botão Setup: até 4 amigos por prioridade, cada um com seu % de sio; o tank (prioridade 1) também leva exura gran sio abaixo de um % próprio. Pausa se a sua vida cair abaixo do limite, só cura no mesmo andar e acompanha os cooldowns reais do servidor. Nunca solta sio no próprio personagem." },
-  { id: "healfriendtio", name: "Heal Friend (exura tio sio)", src: "Tools", voc: "M", req: ["friends"], desc: "Exura tio sio nos amigos da lista compartilhada (um por vez), com % do amigo e % mínima sua. Nunca solta sio no próprio personagem. Adição rápida de amigo: campo com nome + botão Add / Remove, comandos !add, !del e !friends digitados em qualquer aba do chat (não vão para o servidor; parte do nome serve se só um player na tela bater) e atalho “Friend List: add/remove player” para o player sob o mouse (ou o que você segue), com aviso no meio da tela." },
+  { id: "sio", name: "Sio (Priority + Guild)", src: "Tools", voc: "D", req: ["sio"], desc: "Exura sio. Dois modos, só um ligado por vez (ligar um desliga o outro, com aviso na tela): Priority Sio — switch + Setup com até 4 nomes por prioridade, cada um com seu %; o tank (prioridade 1) também leva exura gran sio abaixo de um % próprio; Guild Sio — switch + Setup que cura o mais ferido entre a lista da guild (baixada do GitHub no botão Refresh Sio list, guardada no bot) e os seus Extra names, com % do amigo e % mínima sua. Extra names: janela Edit extra names, comando !add Nome no chat (não vai para o servidor) ou menu do botão direito no player (Add to / Remove from Sio List). Os dois acompanham os cooldowns reais do servidor, só curam no mesmo andar e nunca soltam sio no próprio personagem.", fix: "Substitui o Heal Friend (exura sio) e o Party Sio; os nomes e % do Party Sio são aproveitados. Com o Potion Friend no mesmo bot, o !add passa a ser do Sio (o Friend List continua com o campo, o atalho, !del e !friends)." },
+  { id: "siotio", name: "Tio Sio (Priority + Guild)", src: "Tools", voc: "M", req: ["sio"], desc: "Exura tio sio (Monk não tem a cura forte no tank). Dois modos, só um ligado por vez (ligar um desliga o outro, com aviso na tela): Priority Sio — switch + Setup com até 4 nomes por prioridade, cada um com seu %; Guild Sio — switch + Setup que cura o mais ferido entre a lista da guild (baixada do GitHub no botão Refresh Sio list, guardada no bot) e os seus Extra names, com % do amigo e % mínima sua. Extra names: janela Edit extra names, comando !add Nome no chat (não vai para o servidor) ou menu do botão direito no player (Add to / Remove from Sio List). Os dois acompanham os cooldowns reais do servidor, só curam no mesmo andar e nunca soltam sio no próprio personagem.", fix: "Substitui o Heal Friend (exura tio sio). Com o Potion Friend no mesmo bot, o !add passa a ser do Sio (o Friend List continua com o campo, o atalho, !del e !friends)." },
   { id: "facemonster", name: "FaceMonster + Wall Hugger (Monk)", src: "Tools", voc: "M", clash: ["wallhugger"], clashMsg: "os dois criam um macro chamado “Wall Hugger” e recuam para a parede; o vBot confunde os dois switches. Use só um.", desc: "FaceMonster vira para a direção que atinge mais monstros (pausa enquanto anda); Wall Hugger próprio recua até a parede quando há mobs demais, com campo de quantidade de mobs. Cada um com seu switch." },
   { id: "wallhugger", name: "Wall Hugger", src: "Tools", desc: "Com 6+ monstros perto, recua para um canto de parede." },
   { id: "swapweapons", name: "Swap Weapon (Diamond)", src: "Tools", voc: "P", req: ["items"], desc: "Ícone “Swap DA” liga/desliga (atalho na janela Hotkeys) e botão “Swap DA Config” na aba abre a janela: bow e crossbow (com botão Grab para pegar a arma da mão), mínimo de mobs em volta do alvo (1 a 10) e PVP Safe (crossbow quando há player de fora da party/guild por perto). Segura a arma pelo menos 2 s para não ficar trocando sem parar.", fix: "Substitui a versão com os campos direto na aba; as armas, a quantidade de mobs e o PVP Safe salvos são migrados uma vez." },
@@ -7372,7 +7875,7 @@ const DEFAULT_LAYOUT = [
   ["Nav", ["autodoors"]],
   ["Outfit", ["#Trocar Outfit Proprio", "outfitpersonal|", "#Trocar Outfit da Guild", "outfitguild"]],
   ["PT", ["#!Auto PT", "autoacceptparty", "autoparty|", "#!Navi", "attackleader|", "followatk|", "#!Olheiro Full", "olheirofull|", "#!Olheiro Guilds", "olheiroguild|"]],
-  ["Tools", ["haste", "huntconfig|", "healfriend|", "wallhugger|", "swapweapons|", "exori|", "attackrune", "paralyze|", "treinarml|", "autolootbp|"]],
+  ["Tools", ["haste", "huntconfig|", "sio", "siotio|", "wallhugger|", "swapweapons|", "exori|", "attackrune", "paralyze|", "treinarml|", "autolootbp|"]],
 ];
 
 let __uid = 0;
@@ -7487,6 +7990,7 @@ const HELPER_NAMES = {
   antipush: "funções de fields, coins e bombs",
   comma_value: "formatação de números (comma_value)",
   friends: "lista de amigos compartilhada",
+  sio: "Priority Sio + Guild Sio (função addSioModes)",
   stance_data: "dados das stances",
 };
 
@@ -7666,6 +8170,7 @@ const LEGACY_NAMES = {
   "Exori Mas Res": "exorimasres", "Summon": "summon", "Fire Bomb": "fieldbomb", "Energy Bomb": "energybomb",
   "Auto Energy": "energy", "Exura Sio em si": "exurasio_self", "Utura Gran": "uturagran",
   "Blood Rage": "bloodrage", "Utamo Tempo": "utamotempo", "Haste (utani hur)": "haste1", "Haste forte da voc": "haste2",
+  "Heal Friend (exura sio)": "healfriend", "Party Sio": "partysio", "Heal Friend (exura tio sio)": "healfriendtio",
 };
 
 function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -7807,6 +8312,8 @@ if (typeof module !== "undefined") {
       fieldbomb: ["firebomb", "energybomb"],
       huntconfig: ["fixedpoint", "exetaloot", "exetares", "exetaampres", "exetaresfull", "exanaampres", "exorimasres", "summon", "uturagran"],
       haste: ["haste1", "haste2"],
+      sio: ["healfriend", "partysio"],
+      siotio: ["healfriendtio"],
     };
     for (const [newId, oldIds] of Object.entries(MERGED)) {
       let placed = allIds.includes(newId);
