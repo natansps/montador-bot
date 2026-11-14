@@ -3699,6 +3699,26 @@ do
     addRow({label = "Auto Exeta Loot", macro = exetaLoot})
   end
 
+  -- >> Coxinha (infinite food)
+  do
+    local infiniteFoodIds = {16706, 16707}   -- stages that can be eaten
+    local forbiddenFoodId = 16708            -- empty stage: never use it
+
+    addRow({label = "Coxinha", macro = macro(2000, "Coxinha", function()
+      -- High regeneration time = still full, nothing to do
+      if player:getRegenerationTime() > 400 then return end
+      for _, container in pairs(g_game.getContainers()) do
+        for _, item in ipairs(container:getItems()) do
+          local id = item:getId()
+          if id ~= forbiddenFoodId and table.find(infiniteFoodIds, id) then
+            g_game.use(item)
+            return
+          end
+        end
+      end
+    end)})
+  end
+
   -- >> Fixed Point
   do
     storage.fixedPoint = storage.fixedPoint or {}
@@ -7863,7 +7883,7 @@ const MACROS = [
   { id: "stancebuttons", mode: "button", name: "Botões de stance", src: "Cave", req: ["stance_data"], desc: "Título verde “Stances” e um botão para cada stance da sua vocação (sem título se a voc não tiver stance)." },
   // Tools
   { id: "haste", noPanel: true, name: "Haste", src: "Tools", req: ["items"], desc: "Sem nada na aba: tudo pelo ícone, que mostra a haste escolhida em verde quando ligado e vermelho quando desligado. Clique liga/desliga; Shift+clique troca a magia (Utani Hur e a haste forte da voc: Tempo Hur no knight, Tempo San no paladin, Gran Hur no sorcerer, druid e monk); Ctrl+arrastar move. Só solta andando e fora de PZ. Atalho na janela Hotkeys.", fix: "Antes ficava dentro do Hunt Config, com a lista de magias na aba; magia escolhida, liga/desliga, ícone e atalho salvos são aproveitados." },
-  { id: "huntconfig", name: "Hunt Config", src: "Tools", req: ["items"], desc: "Botão “Hunt Config” na aba abre uma janela com uma linha por macro (switch + ajuste próprio), só com os da sua vocação: Utura Gran (Knight/Paladin), Summon (não invoca se já tiver summon na tela), Auto Exeta Loot e Fixed Point (Set Point e posição salva). Os switches acompanham ícones e atalhos.", fix: "Substitui os antigos Fixed Point, Auto Exeta Loot, Exeta Res, Exeta Amp Res, Exeta Res Full, Exana Amp Res, Exori Mas Res e Summon e a versão com grupo recolhível na aba; liga/desliga e Fixed Point salvos são aproveitados. Exeta, Exana Amp Res e Exori Mas Res agora ficam no Res Spells (só ícone)." },
+  { id: "huntconfig", name: "Hunt Config", src: "Tools", req: ["items"], desc: "Botão “Hunt Config” na aba abre uma janela com uma linha por macro (switch + ajuste próprio), só com os da sua vocação: Utura Gran (Knight/Paladin), Summon (não invoca se já tiver summon na tela), Auto Exeta Loot, Coxinha (come a food infinita 16706/16707 quando a regeneração baixa; nunca usa a 16708) e Fixed Point (Set Point e posição salva). Os switches acompanham ícones e atalhos.", fix: "Substitui os antigos Fixed Point, Auto Exeta Loot, Exeta Res, Exeta Amp Res, Exeta Res Full, Exana Amp Res, Exori Mas Res e Summon e a versão com grupo recolhível na aba; liga/desliga e Fixed Point salvos são aproveitados. Exeta, Exana Amp Res e Exori Mas Res agora ficam no Res Spells (só ícone)." },
   { id: "resspell", noPanel: true, name: "Res Spells (Exeta / Amp Res / Mas Res)", src: "Tools", req: ["items"], desc: "Sem nada na aba: tudo pelo ícone, que mostra o modo em verde quando ligado e vermelho quando desligado. Knight: Exeta com Shift+clique trocando o modo (Exeta Res → Res Full → Amp Res → Alternate); Paladin: Exana Amp Res; Monk: Exori Mas Res. Clique liga/desliga; Ctrl+arrastar move. Atalho na janela Hotkeys. Nas outras vocações não cria nada.", fix: "Antes ficava dentro do Hunt Config; modo do Exeta, liga/desliga, posição do ícone e atalho salvos são aproveitados." },
   { id: "sio", name: "Sio (Priority + Guild)", src: "Tools", voc: "D", req: ["sio"], desc: "Exura sio. Dois modos, só um ligado por vez (ligar um desliga o outro, com aviso na tela): Priority Sio — switch + Setup com até 4 nomes por prioridade, cada um com seu %; o tank (prioridade 1) também leva exura gran sio abaixo de um % próprio; Guild Sio — switch + Setup que cura o mais ferido entre a lista da guild (baixada do GitHub no botão Refresh Sio list, guardada no bot) e os seus Extra names, com % do amigo e % mínima sua. Extra names: janela Edit extra names, comando !add Nome no chat (não vai para o servidor) ou menu do botão direito no player (Add to / Remove from Sio List). Os dois acompanham os cooldowns reais do servidor, só curam no mesmo andar e nunca soltam sio no próprio personagem.", fix: "Substitui o Heal Friend (exura sio) e o Party Sio; os nomes e % do Party Sio são aproveitados. Com o Potion Friend no mesmo bot, o !add passa a ser do Sio (o Friend List continua com o campo, o atalho, !del e !friends)." },
   { id: "siotio", name: "Tio Sio (Priority + Guild)", src: "Tools", voc: "M", req: ["sio"], desc: "Exura tio sio (Monk não tem a cura forte no tank). Dois modos, só um ligado por vez (ligar um desliga o outro, com aviso na tela): Priority Sio — switch + Setup com até 4 nomes por prioridade, cada um com seu %; Guild Sio — switch + Setup que cura o mais ferido entre a lista da guild (baixada do GitHub no botão Refresh Sio list, guardada no bot) e os seus Extra names, com % do amigo e % mínima sua. Extra names: janela Edit extra names, comando !add Nome no chat (não vai para o servidor) ou menu do botão direito no player (Add to / Remove from Sio List). Os dois acompanham os cooldowns reais do servidor, só curam no mesmo andar e nunca soltam sio no próprio personagem.", fix: "Substitui o Heal Friend (exura tio sio). Com o Potion Friend no mesmo bot, o !add passa a ser do Sio (o Friend List continua com o campo, o atalho, !del e !friends)." },
