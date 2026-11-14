@@ -3704,16 +3704,18 @@ do
     local infiniteFoodIds = {16706, 16707}   -- stages that can be eaten
     local forbiddenFoodId = 16708            -- empty stage: never use it
 
-    addRow({label = "Coxinha", macro = macro(2000, "Coxinha", function()
+    addRow({label = "Coxinha", macro = macro(30000, "Coxinha", function()
       -- High regeneration time = still full, nothing to do
       if player:getRegenerationTime() > 400 then return end
       for _, container in pairs(g_game.getContainers()) do
         for _, item in ipairs(container:getItems()) do
           local id = item:getId()
-          if id ~= forbiddenFoodId and table.find(infiniteFoodIds, id) then
+          if table.find(infiniteFoodIds, id) then
             g_game.use(item)
             return
           end
+          -- Empty stage found: stop here
+          if id == forbiddenFoodId then return end
         end
       end
     end)})
