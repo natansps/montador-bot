@@ -3484,6 +3484,137 @@ end)
 
 Jujuba.hotkey("haste", "Haste", "", hasteMacro)
 </script>
+<script type="text/x-lua" data-kind="block" data-id="resspell">
+-- Res spells (icon only, no space in the tab)
+-- Knight: Exeta (Res, Res Full, Amp Res, Alternate) | Paladin: Exana Amp Res | Monk: Exori Mas Res
+-- Click: toggle on/off | Shift+Click: next mode (Knight) | Ctrl+Drag: move
+do
+  -- Monsters ignored by "Exeta Res" (do not count as adjacent)
+  local whitelist = {"Emberwing", "Skullfrost", "Grovebeast", "Thundergiant"}
+
+  local function hasMonsterAdjacent()
+    for _, mob in ipairs(getSpectators()) do
+      if mob:isMonster()
+      and getDistanceBetween(player:getPosition(), mob:getPosition()) <= 1
+      and not table.find(whitelist, mob:getName()) then
+        return true
+      end
+    end
+    return false
+  end
+
+  -- Same icon ids, macro names and storage as before, so position,
+  -- on/off and the chosen mode are kept
+  local resOptions, cfg, iconId, macroName, hotkeyId, delayMs
+  if isKnightVoc() then
+    iconId, macroName, hotkeyId = "Exeta", "Exeta", "exeta"
+    resOptions = {
+      {name = "Exeta Res", short = "Exeta Res",
+        spell = "exeta res", when = hasMonsterAdjacent},           -- only with an adjacent monster
+      {name = "Exeta Res Full", short = "Res Full",
+        spell = "exeta res", when = function() return true end},   -- always
+      {name = "Exeta Amp Res", short = "Amp Res",
+        spell = "exeta amp res", when = function() return manapercent() > 30 end},
+      {name = "Exeta Alternate", short = "Alternate",                -- exeta res / exeta amp res in turns
+        spells = {"exeta res", "exeta amp res"}, wait = 2000,
+        when = function() return true end},
+    }
+    storage.jujubaExeta = storage.jujubaExeta or {}
+    cfg = storage.jujubaExeta
+  elseif isPaladinVoc() then
+    iconId, macroName, hotkeyId = "ExanaAmpRes", "Exana Amp Res", "exanaAmpRes"
+    resOptions = {
+      {name = "Exana Amp Res", short = "Amp Res", spell = "exana amp res",
+        when = function() return manapercent() > 30 end},
+    }
+    cfg = {}
+  elseif isMonkVoc() then
+    iconId, macroName, hotkeyId = "ExoriMasRes", "Exori Mas Res", "exoriMasRes"
+    resOptions = {
+      {name = "Exori Mas Res", short = "Mas Res", spell = "exori mas res", wait = 200,
+        when = function() return g_game.isAttacking() end},
+    }
+    cfg = {}
+  end
+
+  if resOptions then
+    local byName = {}
+    for _, o in ipairs(resOptions) do byName[o.name] = o end
+    if not byName[cfg.choice] then
+      cfg.choice = resOptions[1].name
+    end
+
+    local altIndex = 1   -- next spell of the "spells" list
+
+    local resMacro = macro(200, macroName, function()
+      local o = byName[cfg.choice]
+      if not o or not o.when() then return end
+      local spell = o.spell
+      if o.spells then
+        if altIndex > #o.spells then altIndex = 1 end
+        spell = o.spells[altIndex]
+      end
+      if Jujuba.cast(spell) then
+        if o.spells then altIndex = altIndex % #o.spells + 1 end
+        delay(o.wait or 1000)
+      end
+    end)
+
+    -- Hide the macro switch in the tab: control only via icon/hotkey
+    Jujuba.hideSwitch(resMacro)
+
+    local resIcon
+    local lastKey
+
+    -- Updates icon text color (green = on, red = off)
+    local function refreshResIcon(force)
+      if not resIcon or not resIcon.text then return end
+      local o = byName[cfg.choice]
+      if not o then return end
+      local isOn = resMacro.isOn()
+      local key = o.name .. (isOn and "|on" or "|off")
+      if not force and key == lastKey then return end
+      lastKey = key
+      resIcon.text:setColoredText({o.short, isOn and "green" or "red"})
+    end
+
+    local function nextOption()
+      local idx = 0
+      for i, o in ipairs(resOptions) do
+        if o.name == cfg.choice then idx = i break end
+      end
+      cfg.choice = resOptions[idx % #resOptions + 1].name
+      altIndex = 1
+    end
+
+    local itemId = ICONS.exeta
+    if isPaladinVoc() then itemId = ICONS.exanaAmpRes or ICONS.exeta end
+    if isMonkVoc() then itemId = ICONS.exoriMasRes or ICONS.exeta end
+
+    resIcon = addIcon(iconId, {
+      item = {id = itemId, count = 1},
+      text = byName[cfg.choice].short,
+      switchable = false
+    }, function()
+      if g_keyboard.isShiftPressed() then
+        if #resOptions > 1 then nextOption() end
+      else
+        resMacro.setOn(not resMacro.isOn())
+      end
+      refreshResIcon(true)
+    end)
+    resIcon:setWidth(100)
+    refreshResIcon(true)
+
+    -- Keeps the icon in sync when toggled by hotkey
+    macro(250, function()
+      refreshResIcon(false)
+    end)
+
+    Jujuba.hotkey(hotkeyId, macroName, "", resMacro)
+  end
+end
+</script>
 <script type="text/x-lua" data-kind="block" data-id="huntconfig">
 -- All hunt macros live in one window ("Hunt Config" button in the Tools tab).
 -- Each row: switch (on/off) + its own setting. Only rows for your vocation show.
@@ -3504,28 +3635,6 @@ do
         Jujuba.cast("utura gran")
       end
     end)})
-  end
-
-  -- >> Exana Amp Res  [Paladin]
-  if isPaladinVoc() then
-    local ampRes = macro(200, "Exana Amp Res", function()
-      if manapercent() > 30 and Jujuba.cast("exana amp res") then
-        delay(1000)
-      end
-    end)
-    Jujuba.icon("ExanaAmpRes", ICONS.exanaAmpRes or ICONS.exeta, "Amp Res", ampRes)
-    addRow({label = "Exana Amp Res", macro = ampRes})
-  end
-
-  -- >> Exori Mas Res  [Monk]
-  if isMonkVoc() then
-    local masRes = macro(200, "Exori Mas Res", function()
-      if g_game.isAttacking() then
-        Jujuba.cast("exori mas res")
-      end
-    end)
-    Jujuba.icon("ExoriMasRes", ICONS.exoriMasRes or ICONS.exeta, "Mas Res", masRes)
-    addRow({label = "Exori Mas Res", macro = masRes})
   end
 
   -- >> Summon
@@ -3590,77 +3699,6 @@ do
     addRow({label = "Auto Exeta Loot", macro = exetaLoot})
   end
 
-  -- >> Exeta (mode choice + one icon)  [Knight]
-  if isKnightVoc() then
-    -- Monsters ignored by "Exeta Res" (do not count as adjacent)
-    local whitelist = {"Emberwing", "Skullfrost", "Grovebeast", "Thundergiant"}
-
-    local function hasMonsterAdjacent()
-      for _, mob in ipairs(getSpectators()) do
-        if mob:isMonster()
-        and getDistanceBetween(player:getPosition(), mob:getPosition()) <= 1
-        and not table.find(whitelist, mob:getName()) then
-          return true
-        end
-      end
-      return false
-    end
-
-    local exetaOptions = {
-      {name = "Exeta Res", short = "Exeta Res",
-        spell = "exeta res", when = hasMonsterAdjacent},           -- only with an adjacent monster
-      {name = "Exeta Res Full", short = "Res Full",
-        spell = "exeta res", when = function() return true end},   -- always
-      {name = "Exeta Amp Res", short = "Amp Res",
-        spell = "exeta amp res", when = function() return manapercent() > 30 end},
-      {name = "Exeta Alternate", short = "Alternate",                -- exeta res / exeta amp res in turns
-        spells = {"exeta res", "exeta amp res"}, wait = 2000,
-        when = function() return true end},
-    }
-
-    local altIndex = 1   -- next spell of the "spells" list
-
-    local byName = {}
-    for _, o in ipairs(exetaOptions) do byName[o.name] = o end
-
-    storage.jujubaExeta = storage.jujubaExeta or {}
-    local cfg = storage.jujubaExeta
-    if not byName[cfg.choice] then
-      cfg.choice = exetaOptions[1].name
-    end
-
-    local exetaMacro = macro(200, "Exeta", function()
-      local o = byName[cfg.choice]
-      if not o or not o.when() then return end
-      local spell = o.spell
-      if o.spells then
-        if altIndex > #o.spells then altIndex = 1 end
-        spell = o.spells[altIndex]
-      end
-      if Jujuba.cast(spell) then
-        if o.spells then altIndex = altIndex % #o.spells + 1 end
-        delay(o.wait or 1000)
-      end
-    end)
-
-    local exetaIcon = Jujuba.icon("Exeta", ICONS.exeta, byName[cfg.choice].short, exetaMacro)
-    Jujuba.hotkey("exeta", "Exeta", "", exetaMacro)
-
-    addRow({label = "Exeta", macro = exetaMacro, template = "HuntRowCombo",
-      setup = function(w)
-        for _, o in ipairs(exetaOptions) do
-          w.combo:addOption(o.name)
-        end
-        w.combo:setCurrentOption(cfg.choice)
-        w.combo.onOptionChange = function(_, text)
-          local o = byName[text]
-          if not o then return end
-          cfg.choice = text
-          exetaIcon.text:setText(o.short)
-        end
-      end})
-  end
-
   -- >> Fixed Point
   do
     storage.fixedPoint = storage.fixedPoint or {}
@@ -3723,15 +3761,6 @@ HuntRow < Panel
     anchors.left: parent.left
     size: 120 20
     text-align: center
-
-HuntRowCombo < HuntRow
-  ComboBox
-    id: combo
-    anchors.top: toggle.top
-    anchors.left: toggle.right
-    anchors.right: parent.right
-    margin-left: 6
-    height: 20
 
 HuntRowButton < HuntRow
   height: 38
@@ -7834,7 +7863,8 @@ const MACROS = [
   { id: "stancebuttons", mode: "button", name: "Botões de stance", src: "Cave", req: ["stance_data"], desc: "Título verde “Stances” e um botão para cada stance da sua vocação (sem título se a voc não tiver stance)." },
   // Tools
   { id: "haste", noPanel: true, name: "Haste", src: "Tools", req: ["items"], desc: "Sem nada na aba: tudo pelo ícone, que mostra a haste escolhida em verde quando ligado e vermelho quando desligado. Clique liga/desliga; Shift+clique troca a magia (Utani Hur e a haste forte da voc: Tempo Hur no knight, Tempo San no paladin, Gran Hur no sorcerer, druid e monk); Ctrl+arrastar move. Só solta andando e fora de PZ. Atalho na janela Hotkeys.", fix: "Antes ficava dentro do Hunt Config, com a lista de magias na aba; magia escolhida, liga/desliga, ícone e atalho salvos são aproveitados." },
-  { id: "huntconfig", name: "Hunt Config", src: "Tools", req: ["items"], desc: "Botão “Hunt Config” na aba abre uma janela com uma linha por macro (switch + ajuste próprio), só com os da sua vocação: Utura Gran (Knight/Paladin), Exana Amp Res (Paladin, com ícone), Exori Mas Res (Monk, com ícone), Summon (não invoca se já tiver summon na tela), Auto Exeta Loot, Exeta (Knight: Res, Res Full, Amp Res ou Alternate, com ícone e atalho) e Fixed Point (Set Point e posição salva). Os switches acompanham ícones e atalhos.", fix: "Substitui os antigos Fixed Point, Auto Exeta Loot, Exeta Res, Exeta Amp Res, Exeta Res Full, Exana Amp Res, Exori Mas Res e Summon e a versão com grupo recolhível na aba; liga/desliga, modo do Exeta e Fixed Point salvos são aproveitados." },
+  { id: "huntconfig", name: "Hunt Config", src: "Tools", req: ["items"], desc: "Botão “Hunt Config” na aba abre uma janela com uma linha por macro (switch + ajuste próprio), só com os da sua vocação: Utura Gran (Knight/Paladin), Summon (não invoca se já tiver summon na tela), Auto Exeta Loot e Fixed Point (Set Point e posição salva). Os switches acompanham ícones e atalhos.", fix: "Substitui os antigos Fixed Point, Auto Exeta Loot, Exeta Res, Exeta Amp Res, Exeta Res Full, Exana Amp Res, Exori Mas Res e Summon e a versão com grupo recolhível na aba; liga/desliga e Fixed Point salvos são aproveitados. Exeta, Exana Amp Res e Exori Mas Res agora ficam no Res Spells (só ícone)." },
+  { id: "resspell", noPanel: true, name: "Res Spells (Exeta / Amp Res / Mas Res)", src: "Tools", req: ["items"], desc: "Sem nada na aba: tudo pelo ícone, que mostra o modo em verde quando ligado e vermelho quando desligado. Knight: Exeta com Shift+clique trocando o modo (Exeta Res → Res Full → Amp Res → Alternate); Paladin: Exana Amp Res; Monk: Exori Mas Res. Clique liga/desliga; Ctrl+arrastar move. Atalho na janela Hotkeys. Nas outras vocações não cria nada.", fix: "Antes ficava dentro do Hunt Config; modo do Exeta, liga/desliga, posição do ícone e atalho salvos são aproveitados." },
   { id: "sio", name: "Sio (Priority + Guild)", src: "Tools", voc: "D", req: ["sio"], desc: "Exura sio. Dois modos, só um ligado por vez (ligar um desliga o outro, com aviso na tela): Priority Sio — switch + Setup com até 4 nomes por prioridade, cada um com seu %; o tank (prioridade 1) também leva exura gran sio abaixo de um % próprio; Guild Sio — switch + Setup que cura o mais ferido entre a lista da guild (baixada do GitHub no botão Refresh Sio list, guardada no bot) e os seus Extra names, com % do amigo e % mínima sua. Extra names: janela Edit extra names, comando !add Nome no chat (não vai para o servidor) ou menu do botão direito no player (Add to / Remove from Sio List). Os dois acompanham os cooldowns reais do servidor, só curam no mesmo andar e nunca soltam sio no próprio personagem.", fix: "Substitui o Heal Friend (exura sio) e o Party Sio; os nomes e % do Party Sio são aproveitados. Com o Potion Friend no mesmo bot, o !add passa a ser do Sio (o Friend List continua com o campo, o atalho, !del e !friends)." },
   { id: "siotio", name: "Tio Sio (Priority + Guild)", src: "Tools", voc: "M", req: ["sio"], desc: "Exura tio sio (Monk não tem a cura forte no tank). Dois modos, só um ligado por vez (ligar um desliga o outro, com aviso na tela): Priority Sio — switch + Setup com até 4 nomes por prioridade, cada um com seu %; Guild Sio — switch + Setup que cura o mais ferido entre a lista da guild (baixada do GitHub no botão Refresh Sio list, guardada no bot) e os seus Extra names, com % do amigo e % mínima sua. Extra names: janela Edit extra names, comando !add Nome no chat (não vai para o servidor) ou menu do botão direito no player (Add to / Remove from Sio List). Os dois acompanham os cooldowns reais do servidor, só curam no mesmo andar e nunca soltam sio no próprio personagem.", fix: "Substitui o Heal Friend (exura tio sio). Com o Potion Friend no mesmo bot, o !add passa a ser do Sio (o Friend List continua com o campo, o atalho, !del e !friends)." },
   { id: "facemonster", name: "FaceMonster + Wall Hugger (Monk)", src: "Tools", voc: "M", clash: ["wallhugger"], clashMsg: "os dois criam um macro chamado “Wall Hugger” e recuam para a parede; o vBot confunde os dois switches. Use só um.", desc: "FaceMonster vira para a direção que atinge mais monstros (pausa enquanto anda); Wall Hugger próprio recua até a parede quando há mobs demais, com campo de quantidade de mobs. Cada um com seu switch." },
@@ -7875,7 +7905,7 @@ const DEFAULT_LAYOUT = [
   ["Nav", ["autodoors"]],
   ["Outfit", ["#Trocar Outfit Proprio", "outfitpersonal|", "#Trocar Outfit da Guild", "outfitguild"]],
   ["PT", ["#!Auto PT", "autoacceptparty", "autoparty|", "#!Navi", "attackleader|", "followatk|", "#!Olheiro Full", "olheirofull|", "#!Olheiro Guilds", "olheiroguild|"]],
-  ["Tools", ["haste", "huntconfig|", "sio", "siotio|", "wallhugger|", "swapweapons|", "exori|", "attackrune", "paralyze|", "treinarml|", "autolootbp|"]],
+  ["Tools", ["haste", "resspell", "huntconfig|", "sio", "siotio|", "wallhugger|", "swapweapons|", "exori|", "attackrune", "paralyze|", "treinarml|", "autolootbp|"]],
 ];
 
 let __uid = 0;
@@ -7906,7 +7936,7 @@ function defaultState() {
       return true;
     });
   });
-  return { v: 1, tabs, hidden, hotkeys: {}, mode: "perTab", prefix: "Jujuba Scripts", hasteSplit: true };
+  return { v: 1, tabs, hidden, hotkeys: {}, mode: "perTab", prefix: "Jujuba Scripts", hasteSplit: true, resSplit: true };
 }
 
 // ===== Gerador =====
@@ -8048,6 +8078,7 @@ function encodeState(state) {
     mode: state.mode,
     prefix: state.prefix,
     hs: 1,
+    rs: 1,
     hotkeys: state.hotkeys || {},
     hidden: (state.hidden || []).filter((it) => it.type === "macro").map((it) => it.id),
     tabs: state.tabs.map((t) => ({
@@ -8069,7 +8100,7 @@ function decodeState(b64) {
   const o = JSON.parse(json);
   if (!o || o.v !== 1 || !Array.isArray(o.tabs)) throw new Error("formato desconhecido");
   return {
-    v: 1, mode: o.mode, prefix: o.prefix, hotkeys: o.hotkeys || {}, hasteSplit: !!o.hs,
+    v: 1, mode: o.mode, prefix: o.prefix, hotkeys: o.hotkeys || {}, hasteSplit: !!o.hs, resSplit: !!o.rs,
     hidden: (o.hidden || []).map((id) => ({ uid: newUid(), type: "macro", id, sep: false })),
     tabs: o.tabs.map((t) => ({
       id: newUid(), name: t.name, onTop: t.onTop !== false,
@@ -8375,6 +8406,14 @@ if (typeof module !== "undefined") {
       const all = s.hidden.concat(...s.tabs.map((t) => t.items));
       if (all.some((it) => it.id === "huntconfig") && !all.some((it) => it.id === "haste")) {
         s.hidden.push({ uid: newUid(), type: "macro", id: "haste", sep: false });
+      }
+    }
+    // Exeta / Amp Res / Mas Res saíram do Hunt Config: quem usava ganha o Res Spells em Sem aba (uma vez só)
+    if (!s.resSplit) {
+      s.resSplit = true;
+      const all = s.hidden.concat(...s.tabs.map((t) => t.items));
+      if (all.some((it) => it.id === "huntconfig") && !all.some((it) => it.id === "resspell")) {
+        s.hidden.push({ uid: newUid(), type: "macro", id: "resspell", sep: false });
       }
     }
     s.hotkeys = s.hotkeys || {};
@@ -8910,7 +8949,7 @@ if (typeof module !== "undefined") {
   }
   function newBotState() {
     return sanitize({
-      v: 1, mode: "perTab", prefix: "Jujuba Scripts", hotkeys: {}, hidden: [], hasteSplit: true,
+      v: 1, mode: "perTab", prefix: "Jujuba Scripts", hotkeys: {}, hidden: [], hasteSplit: true, resSplit: true,
       tabs: ["Main", "Cave", "Target", "HP", "Tools"].map((name) => ({ id: newUid(), name, items: [] })),
     });
   }
